@@ -1,0 +1,22 @@
+# Build environment for the graph .deb. Useful for local builds:
+#
+#   docker build -f Dockerfile.build -t graph-build .
+#   docker run --rm -v "$PWD:/src" -w /src graph-build make deb
+#
+# Version is read from the VERSION file at the repo root.
+
+FROM debian:bullseye-slim
+# build against oldest still-supported glibc so the resulting .deb runs on
+# bullseye, bookworm, trixie, and ubuntu 22.04+. switch to bookworm when
+# bullseye hits EOL (~aug 2026).
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        dpkg-dev \
+        fakeroot \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src

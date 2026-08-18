@@ -1,0 +1,14 @@
+Package: graph
+Version: __VERSION__
+Section: utils
+Priority: optional
+Architecture: __ARCH__
+Maintainer: willgcr <hello@willgcr.me>
+Depends: libc6
+Suggests: samba, cifs-utils
+Homepage: https://wrklabs.org/graph
+Description: filesystem repository shared over SMB
+ graph initialises an ordinary directory as a repository for documents,
+ records, notes and media, serves it over SMB through Samba, and mounts
+ it from other machines. The repository stays a plain directory tree,
+ readable and editable with the tools already on the system.

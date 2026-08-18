@@ -1,0 +1,123 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  verify:
+    name: verify tag matches VERSION
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: check
+        run: |
+          TAG_VER="${GITHUB_REF_NAME#v}"
+          FILE_VER=$(cat VERSION)
+          if [ "$TAG_VER" != "$FILE_VER" ]; then
+            echo "ERROR: tag $TAG_VER does not match VERSION file $FILE_VER"
+            exit 1
+          fi
+          echo "tag and VERSION match: $TAG_VER"
+
+  linux-build:
+    name: build .deb (${{ matrix.arch }})
+    needs: verify
+    runs-on: ${{ matrix.runner }}
+    container: debian:bullseye-slim   # oldest still-supported glibc → runs on
+                                      # bullseye/bookworm/trixie/Ubuntu 22.04+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest        # x86_64 native
+          - arch: arm64
+            runner: ubuntu-24.04-arm     # arm64 native (GitHub-hosted)
+    steps:
+      - name: install build deps
+        # graph links against libc only; these are the packaging tools plus
+        # git for actions/checkout inside the container.
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential dpkg-dev fakeroot ca-certificates git
+
+      - name: checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: build .deb
+        run: make deb
+
+      - name: upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb-${{ matrix.arch }}
+          path: dist/*.deb
+          retention-days: 1
+
+  macos-build:
+    name: build darwin tarball (${{ matrix.arch }})
+    needs: verify
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-14            # Apple Silicon only; Intel runners deprecated
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: build
+        # Floor of macOS 12 — covers anything actively maintained. No build
+        # dependencies: graph uses libc and POSIX only.
+        run: make
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "12.0"
+
+      - name: package tarball
+        # Flat tarball (graph + LICENSE at root), matching the layout the
+        # publisher expects and a binary-style formula would install from.
+        run: |
+          VER=$(cat VERSION)
+          ARCH=${{ matrix.arch }}
+          mkdir -p dist
+          tar -czf "dist/graph-${VER}-darwin-${ARCH}.tar.gz" graph LICENSE
+          ls -la dist/
+
+      - name: upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: darwin-${{ matrix.arch }}
+          path: dist/*.tar.gz
+          retention-days: 1
+
+  release:
+    name: publish github release
+    needs: [linux-build, macos-build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.deb
+            dist/*.tar.gz
+          generate_release_notes: true
