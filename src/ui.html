@@ -87,6 +87,8 @@ header .count b { color: var(--muted); font-weight: 400; }
 #nav .row .nm { overflow: hidden; text-overflow: ellipsis; }
 #nav .row.dir .nm { color: var(--muted); }
 #nav .row.dir.top .nm { color: var(--c, var(--muted)); font-weight: 600; letter-spacing: .3px; }
+#nav .row .fx { color: var(--ghost); }
+table.ls td.nm .fx { color: var(--ghost); }
 #nav .row .ct { margin-left: auto; color: var(--ghost); font-size: 10px; padding-left: 8px; }
 
 /* == content == */
@@ -396,6 +398,16 @@ function fmtDate(t) {
   if (days < 7) return Math.floor(days) + " days ago";
   return d.toISOString().slice(0, 10);
 }
+/* Real filename with the extension dimmed. Used where the pane is a listing
+ * of files — hiding .md there while showing .pdf made the tree agree with
+ * neither the filesystem nor itself. Titles and link lists still strip it,
+ * since that is how links are written. */
+function fname(n) {
+  var d = n.lastIndexOf(".");
+  if (d <= 0) return esc(n);
+  return esc(n.slice(0, d)) + "<span class='fx'>" + esc(n.slice(d)) + "</span>";
+}
+
 function parentOf(p) { var i = p.lastIndexOf("/"); return i < 0 ? "" : p.slice(0, i); }
 function idx(path) { for (var i = 0; i < N.length; i++) if (N[i].path === path) return i; return -1; }
 function domOf(p) { var t = p.split("/")[0]; return DOM.indexOf(t) >= 0 ? t : null; }
@@ -460,7 +472,7 @@ function navTree() {
       } else {
         h += "<div class='row" + (cur === x.i ? " on" : "") + "' data-i='" + x.i +
           "'><span class='tw' style='margin-left:" + pad + "px'></span><span class='nm'>" +
-          esc(x.name.replace(/\.md$/, "")) + "</span></div>";
+          fname(x.name) + "</span></div>";
       }
     });
   }
@@ -574,7 +586,8 @@ function folder(x) {
   kids.forEach(function (k) {
     if (rd && k.i === rd.i) return;
     h += "<tr data-i='" + k.i + "'><td class='nm'><span class='k'>" +
-      (k.type === "dir" ? "▸" : "·") + "</span>" + esc(k.name.replace(/\.md$/, "")) + "</td>" +
+      (k.type === "dir" ? "▸" : "·") + "</span>" +
+      (k.type === "dir" ? esc(k.name) : fname(k.name)) + "</td>" +
       "<td class='n " + (k.ins.length ? "dim" : "zero") + "'>" + (k.ins.length || "·") + "</td>" +
       "<td class='n dim'>" + (k.type === "dir" ? countIn(k.path) + " files" : fmtSize(k.size)) + "</td>" +
       "<td class='n dim'>" + fmtDate(k.mtime) + "</td></tr>";
