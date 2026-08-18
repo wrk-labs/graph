@@ -1,0 +1,904 @@
+/* See LICENSE file for copyright and license details. */
+/* graph display — serve a local, read-only view of a repository
+ *
+ * Experimental. The repository stays the source of truth: this walks the tree
+ * on every request, holds no index, and never writes. */
+
+#include <arpa/inet.h>
+#include <dirent.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <limits.h>
+#include <netinet/in.h>
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <ctype.h>
+#include <string.h>
+#include <strings.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include "graph.h"
+#include "ui.h"
+
+#define MAX_NODES 4096
+#define MAX_EDGES 8192
+#define MAX_BODY  (1 << 20)
+
+enum { T_DIR, T_NOTE, T_FILE, T_MISSING };
+
+struct node {
+	char path[512];		/* repository-relative; "" is the root */
+	char name[256];
+	int type;
+	long size;		/* bytes; 0 for directories and missing */
+	long mtime;		/* epoch seconds; 0 when unknown */
+};
+
+struct edge {
+	int s, t;		/* t < 0 never happens: unresolved targets get
+				 * a T_MISSING node so they are visible */
+	char raw[256];
+};
+
+static struct node nodes[MAX_NODES];
+static struct edge edges[MAX_EDGES];
+static int nnodes, nedges;
+static char repo_root[PATH_MAX];
+
+static const char *
+type_name(int t)
+{
+	switch (t) {
+	case T_DIR:     return "dir";
+	case T_NOTE:    return "note";
+	case T_MISSING: return "missing";
+	default:        return "file";
+	}
+}
+
+static int
+find_node(const char *path)
+{
+	int i;
+
+	for (i = 0; i < nnodes; i++)
+		if (!strcmp(nodes[i].path, path))
+			return i;
+	return -1;
+}
+
+static int
+add_node(const char *path, const char *name, int type)
+{
+	int i;
+
+	if ((i = find_node(path)) >= 0)
+		return i;
+	if (nnodes >= MAX_NODES)
+		return -1;
+	i = nnodes++;
+	snprintf(nodes[i].path, sizeof(nodes[i].path), "%s", path);
+	snprintf(nodes[i].name, sizeof(nodes[i].name), "%s", name);
+	nodes[i].type = type;
+	nodes[i].size = 0;
+	nodes[i].mtime = 0;
+	return i;
+}
+
+static int
+has_suffix(const char *s, const char *suf)
+{
+	size_t ls = strlen(s), lf = strlen(suf);
+
+	return ls >= lf && !strcmp(s + ls - lf, suf);
+}
+
+/* Walk the tree, adding a node per directory and file. Dotfiles are skipped:
+ * .graph is Graph's own business, and the rest is editor and OS litter. */
+static void
+scan(const char *abs, const char *rel)
+{
+	DIR *d;
+	struct dirent *e;
+	struct stat st;
+	char child_abs[PATH_MAX], child_rel[512];
+
+	if (!(d = opendir(abs)))
+		return;
+	while ((e = readdir(d))) {
+		if (e->d_name[0] == '.')
+			continue;
+		if (join_path(child_abs, sizeof(child_abs), abs, e->d_name) < 0)
+			continue;
+		if (*rel)
+			snprintf(child_rel, sizeof(child_rel), "%s/%s", rel, e->d_name);
+		else
+			snprintf(child_rel, sizeof(child_rel), "%s", e->d_name);
+		if (stat(child_abs, &st) < 0)
+			continue;
+		if (S_ISDIR(st.st_mode)) {
+			add_node(child_rel, e->d_name, T_DIR);
+			scan(child_abs, child_rel);
+		} else if (S_ISREG(st.st_mode)) {
+			int ni = add_node(child_rel, e->d_name,
+			    has_suffix(e->d_name, ".md") ? T_NOTE : T_FILE);
+			if (ni >= 0) {
+				nodes[ni].size = (long)st.st_size;
+				nodes[ni].mtime = (long)st.st_mtime;
+			}
+		}
+	}
+	closedir(d);
+}
+
+/* Resolution order, matching the plan: exact path, then `.md` appended, then
+ * directory. No global name lookup, so no index is needed. */
+static int
+resolve(const char *target, const char *from_dir)
+{
+	char buf[512];
+	int i;
+
+	if (!strncmp(target, "./", 2)) {
+		if (*from_dir)
+			snprintf(buf, sizeof(buf), "%s/%s", from_dir, target + 2);
+		else
+			snprintf(buf, sizeof(buf), "%s", target + 2);
+	} else {
+		snprintf(buf, sizeof(buf), "%s", target);
+	}
+	if ((i = find_node(buf)) >= 0)
+		return i;
+
+	if (strlen(buf) + 3 < sizeof(buf)) {
+		char md[512];
+		snprintf(md, sizeof(md), "%s.md", buf);
+		if ((i = find_node(md)) >= 0)
+			return i;
+	}
+	return -1;
+}
+
+static char *
+slurp(const char *abs, size_t *len)
+{
+	FILE *f;
+	char *buf;
+	long n;
+
+	if (!(f = fopen(abs, "rb")))
+		return NULL;
+	fseek(f, 0, SEEK_END);
+	n = ftell(f);
+	rewind(f);
+	if (n < 0 || n > MAX_BODY) {
+		fclose(f);
+		return NULL;
+	}
+	if (!(buf = malloc((size_t)n + 1))) {
+		fclose(f);
+		return NULL;
+	}
+	*len = fread(buf, 1, (size_t)n, f);
+	buf[*len] = '\0';
+	fclose(f);
+	return buf;
+}
+
+/* Pull [[targets]] out of a note. An alias after `|` is display sugar; the
+ * part before it is the path. */
+static void
+extract_links(int from)
+{
+	char abs[PATH_MAX], dir[512], target[256];
+	char *src, *p, *q, *bar;
+	size_t len, n;
+	int to, mi, fenced = 0, ticks = 0;
+
+	if (join_path(abs, sizeof(abs), repo_root, nodes[from].path) < 0)
+		return;
+	if (!(src = slurp(abs, &len)))
+		return;
+
+	snprintf(dir, sizeof(dir), "%s", nodes[from].path);
+	if ((p = strrchr(dir, '/')))
+		*p = '\0';
+	else
+		dir[0] = '\0';
+
+	/* Walk the text tracking code context, so a `[[link]]` shown as an
+	 * example — as the notes about this very syntax do — is not mistaken
+	 * for a reference. */
+	for (p = src; *p; p++) {
+		if (p == src || p[-1] == '\n') {
+			if (!strncmp(p, "```", 3)) {
+				fenced = !fenced;
+				p += 2;
+				continue;
+			}
+			ticks = 0;
+		}
+		if (*p == '`')
+			ticks++;
+		if (fenced || (ticks & 1))
+			continue;
+		if (p[0] != '[' || p[1] != '[')
+			continue;
+		if (!(q = strstr(p + 2, "]]")))
+			break;
+		n = (size_t)(q - (p + 2));
+		if (n == 0 || n >= sizeof(target))
+			continue;
+		memcpy(target, p + 2, n);
+		target[n] = '\0';
+		if ((bar = strchr(target, '|')))
+			*bar = '\0';
+		while (n && (target[n - 1] == ' ' || target[n - 1] == '\t'))
+			target[--n] = '\0';
+		if (!*target)
+			continue;
+
+		if (nedges >= MAX_EDGES)
+			break;
+		to = resolve(target, dir);
+		if (to < 0) {
+			/* Surface the gap rather than dropping the link. An
+			 * unresolved link is not an error, but it is worth
+			 * seeing. */
+			mi = add_node(target, target, T_MISSING);
+			if (mi < 0)
+				continue;
+			to = mi;
+		}
+		edges[nedges].s = from;
+		edges[nedges].t = to;
+		snprintf(edges[nedges].raw, sizeof(edges[nedges].raw), "%s", target);
+		nedges++;
+		p = q + 1;
+	}
+	free(src);
+}
+
+static void
+build(void)
+{
+	int i, n;
+
+	nnodes = nedges = 0;
+	add_node("", "", T_DIR);
+	scan(repo_root, "");
+	n = nnodes;			/* missing nodes get appended below */
+	for (i = 0; i < n; i++)
+		if (nodes[i].type == T_NOTE)
+			extract_links(i);
+}
+
+/* ---- http ---- */
+
+static void
+json_str(FILE *f, const char *s)
+{
+	fputc('"', f);
+	for (; *s; s++) {
+		if (*s == '"' || *s == '\\')
+			fprintf(f, "\\%c", *s);
+		else if ((unsigned char)*s < 0x20)
+			fprintf(f, "\\u%04x", *s);
+		else
+			fputc(*s, f);
+	}
+	fputc('"', f);
+}
+
+static void
+send_head(FILE *f, const char *status, const char *type, size_t len)
+{
+	fprintf(f,
+	    "HTTP/1.1 %s\r\n"
+	    "Content-Type: %s\r\n"
+	    "Content-Length: %zu\r\n"
+	    "Cache-Control: no-store\r\n"
+	    "Connection: close\r\n\r\n",
+	    status, type, len);
+}
+
+static void
+send_text(FILE *f, const char *status, const char *type, const char *body, size_t len)
+{
+	send_head(f, status, type, len);
+	fwrite(body, 1, len, f);
+}
+
+static void
+send_graph(FILE *f)
+{
+	char *buf;
+	size_t len;
+	FILE *m;
+	int i;
+
+	if (!(m = open_memstream(&buf, &len)))
+		return;
+	fputs("{\"root\":", m);
+	json_str(m, repo_root);
+	fputs(",\"nodes\":[", m);
+	for (i = 0; i < nnodes; i++) {
+		if (i)
+			fputc(',', m);
+		fputs("{\"path\":", m);
+		json_str(m, nodes[i].path);
+		fputs(",\"name\":", m);
+		json_str(m, nodes[i].name);
+		fprintf(m, ",\"type\":\"%s\",\"size\":%ld,\"mtime\":%ld}",
+		    type_name(nodes[i].type), nodes[i].size, nodes[i].mtime);
+	}
+	fputs("],\"edges\":[", m);
+	for (i = 0; i < nedges; i++) {
+		if (i)
+			fputc(',', m);
+		fprintf(m, "{\"s\":%d,\"t\":%d,\"raw\":", edges[i].s,
+		    nodes[edges[i].t].type == T_MISSING ? -1 : edges[i].t);
+		json_str(m, edges[i].raw);
+		fputc('}', m);
+	}
+	fputs("]}", m);
+	fclose(m);
+
+	send_text(f, "200 OK", "application/json", buf, len);
+	free(buf);
+}
+
+/* Case-insensitive substring search across note contents. Grep, essentially:
+ * no index, no ranking, no stemming — the tree is small and the filesystem is
+ * fast enough that pretending otherwise would only add ways to be wrong. */
+static void
+send_search(FILE *f, const char *q)
+{
+	char abs[PATH_MAX], *buf, *m;
+	char *line, *next, lower[1024], needle[256];
+	size_t len, i, n;
+	char *json;
+	size_t jlen;
+	FILE *o;
+	int node, lineno, hits = 0;
+
+	for (i = 0; q[i] && i < sizeof(needle) - 1; i++)
+		needle[i] = (char)tolower((unsigned char)q[i]);
+	needle[i] = '\0';
+
+	if (!(o = open_memstream(&json, &jlen)))
+		return;
+	fputs("{\"hits\":[", o);
+
+	for (node = 0; node < nnodes && hits < 200; node++) {
+		if (nodes[node].type != T_NOTE)
+			continue;
+		if (join_path(abs, sizeof(abs), repo_root, nodes[node].path) < 0)
+			continue;
+		if (!(buf = slurp(abs, &len)))
+			continue;
+		lineno = 0;
+		for (line = buf; line && *line; line = next) {
+			if ((next = strchr(line, '\n')))
+				*next++ = '\0';
+			lineno++;
+			n = strlen(line);
+			if (n >= sizeof(lower))
+				n = sizeof(lower) - 1;
+			for (i = 0; i < n; i++)
+				lower[i] = (char)tolower((unsigned char)line[i]);
+			lower[n] = '\0';
+			if (!(m = strstr(lower, needle)))
+				continue;
+			if (hits++)
+				fputc(',', o);
+			fputs("{\"path\":", o);
+			json_str(o, nodes[node].path);
+			fprintf(o, ",\"line\":%d,\"text\":", lineno);
+			json_str(o, line);
+			fputc('}', o);
+			if (hits >= 200)
+				break;
+		}
+		free(buf);
+	}
+	fprintf(o, "],\"n\":%d}", hits);
+	fclose(o);
+	send_text(f, "200 OK", "application/json", json, jlen);
+	free(json);
+}
+
+static void
+url_decode(char *s)
+{
+	char *o = s;
+	int hi, lo;
+
+	for (; *s; s++) {
+		if (*s == '%' && s[1] && s[2] &&
+		    sscanf(s + 1, "%1x%1x", &hi, &lo) == 2) {
+			*o++ = (char)(hi << 4 | lo);
+			s += 2;
+		} else if (*s == '+') {
+			*o++ = ' ';
+		} else {
+			*o++ = *s;
+		}
+	}
+	*o = '\0';
+}
+
+/* Only paths that turned up in the scan are readable, which rules out
+ * traversal without any string surgery. */
+static void
+send_file(FILE *f, const char *rel)
+{
+	char abs[PATH_MAX];
+	char *body;
+	size_t len;
+	int i;
+
+	i = find_node(rel);
+	if (i < 0 || nodes[i].type == T_DIR || nodes[i].type == T_MISSING) {
+		send_text(f, "404 Not Found", "text/plain", "not found", 9);
+		return;
+	}
+	if (join_path(abs, sizeof(abs), repo_root, rel) < 0 ||
+	    !(body = slurp(abs, &len))) {
+		send_text(f, "404 Not Found", "text/plain", "not found", 9);
+		return;
+	}
+	send_text(f, "200 OK", "text/plain; charset=utf-8", body, len);
+	free(body);
+}
+
+/* Write a note back to disk.
+ *
+ * Three guards, none of them optional:
+ *   - the path must already exist in the scan, which rules out traversal and
+ *     creation by the same argument that protects reads;
+ *   - the caller must present the mtime it loaded, so a note changed on disk
+ *     since — over SMB, by an editor, by anything — is refused rather than
+ *     silently overwritten;
+ *   - the new content lands in a temporary file and is renamed into place, so
+ *     a failure part way through cannot leave a truncated note.
+ */
+static void
+write_file(FILE *f, const char *rel, long expect_mtime, const char *body, size_t len)
+{
+	char abs[PATH_MAX], tmp[PATH_MAX];
+	struct stat st;
+	FILE *o;
+	int i;
+
+	i = find_node(rel);
+	if (i < 0 || (nodes[i].type != T_NOTE && nodes[i].type != T_FILE)) {
+		send_text(f, "404 Not Found", "text/plain", "not found", 9);
+		return;
+	}
+	if (join_path(abs, sizeof(abs), repo_root, rel) < 0) {
+		send_text(f, "400 Bad Request", "text/plain", "bad path", 8);
+		return;
+	}
+	if (stat(abs, &st) < 0) {
+		send_text(f, "404 Not Found", "text/plain", "not found", 9);
+		return;
+	}
+	if (expect_mtime && (long)st.st_mtime != expect_mtime) {
+		send_text(f, "409 Conflict", "text/plain",
+		    "changed on disk since loaded", 28);
+		return;
+	}
+
+	if ((size_t)snprintf(tmp, sizeof(tmp), "%s.graph-tmp", abs) >= sizeof(tmp)) {
+		send_text(f, "400 Bad Request", "text/plain", "bad path", 8);
+		return;
+	}
+	if (!(o = fopen(tmp, "wb"))) {
+		send_text(f, "500 Internal Server Error", "text/plain", "cannot write", 12);
+		return;
+	}
+	if (fwrite(body, 1, len, o) != len || fclose(o) != 0) {
+		unlink(tmp);
+		send_text(f, "500 Internal Server Error", "text/plain", "cannot write", 12);
+		return;
+	}
+	if (rename(tmp, abs) < 0) {
+		unlink(tmp);
+		send_text(f, "500 Internal Server Error", "text/plain", "cannot replace", 14);
+		return;
+	}
+	if (stat(abs, &st) == 0) {
+		char out[64];
+		int n = snprintf(out, sizeof(out), "{\"mtime\":%ld,\"size\":%ld}",
+		    (long)st.st_mtime, (long)st.st_size);
+		send_text(f, "200 OK", "application/json", out, (size_t)n);
+	} else {
+		send_text(f, "200 OK", "application/json", "{}", 2);
+	}
+}
+
+static const char *
+mime_of(const char *path)
+{
+	const char *d = strrchr(path, '.');
+
+	if (!d)
+		return "application/octet-stream";
+	if (!strcasecmp(d, ".png"))  return "image/png";
+	if (!strcasecmp(d, ".jpg") || !strcasecmp(d, ".jpeg")) return "image/jpeg";
+	if (!strcasecmp(d, ".gif"))  return "image/gif";
+	if (!strcasecmp(d, ".webp")) return "image/webp";
+	if (!strcasecmp(d, ".svg"))  return "image/svg+xml";
+	if (!strcasecmp(d, ".pdf"))  return "application/pdf";
+	if (!strcasecmp(d, ".csv"))  return "text/csv; charset=utf-8";
+	if (!strcasecmp(d, ".txt") || !strcasecmp(d, ".md"))
+		return "text/plain; charset=utf-8";
+	return "application/octet-stream";
+}
+
+/* Serve a file with its real content type so the browser can display it in
+ * place. Same guard as every other read: only paths the scan already found. */
+static void
+send_raw(FILE *f, const char *rel)
+{
+	char abs[PATH_MAX];
+	char *body;
+	size_t len;
+	int i;
+
+	i = find_node(rel);
+	if (i < 0 || nodes[i].type == T_DIR || nodes[i].type == T_MISSING) {
+		send_text(f, "404 Not Found", "text/plain", "not found", 9);
+		return;
+	}
+	if (join_path(abs, sizeof(abs), repo_root, rel) < 0 ||
+	    !(body = slurp(abs, &len))) {
+		send_text(f, "404 Not Found", "text/plain", "not found", 9);
+		return;
+	}
+	fprintf(f,
+	    "HTTP/1.1 200 OK\r\n"
+	    "Content-Type: %s\r\n"
+	    "Content-Length: %zu\r\n"
+	    "X-Content-Type-Options: nosniff\r\n"
+	    "Cache-Control: no-store\r\n"
+	    "Connection: close\r\n\r\n",
+	    mime_of(rel), len);
+	fwrite(body, 1, len, f);
+	free(body);
+}
+
+/* Create a note or a directory.
+ *
+ * The parent must already be part of the repository, which keeps creation
+ * inside the tree by the same argument that protects reads, and an existing
+ * path is refused rather than truncated. */
+static void
+create_path(FILE *f, const char *rel, int as_dir)
+{
+	char abs[PATH_MAX], parent[512], *slash;
+	struct stat st;
+	FILE *o;
+	int fd;
+
+	if (!*rel || strstr(rel, "..") || rel[0] == '/' || strchr(rel, '\\')) {
+		send_text(f, "400 Bad Request", "text/plain", "bad path", 8);
+		return;
+	}
+	snprintf(parent, sizeof(parent), "%s", rel);
+	if ((slash = strrchr(parent, '/'))) {
+		*slash = '\0';
+		if (find_node(parent) < 0) {
+			send_text(f, "404 Not Found", "text/plain", "no such directory", 17);
+			return;
+		}
+	}
+	if (join_path(abs, sizeof(abs), repo_root, rel) < 0) {
+		send_text(f, "400 Bad Request", "text/plain", "bad path", 8);
+		return;
+	}
+	if (stat(abs, &st) == 0) {
+		send_text(f, "409 Conflict", "text/plain", "already exists", 14);
+		return;
+	}
+
+	if (as_dir) {
+		if (mkdir(abs, 0755) < 0) {
+			send_text(f, "500 Internal Server Error", "text/plain",
+			    "cannot create", 13);
+			return;
+		}
+	} else {
+		/* O_EXCL so two clients cannot both believe they made it */
+		if ((fd = open(abs, O_WRONLY | O_CREAT | O_EXCL, 0644)) < 0) {
+			send_text(f, "500 Internal Server Error", "text/plain",
+			    "cannot create", 13);
+			return;
+		}
+		if ((o = fdopen(fd, "w"))) {
+			const char *base = (slash = strrchr(rel, '/')) ? slash + 1 : rel;
+			char title[256];
+			size_t n = strlen(base);
+
+			if (n > 3 && !strcasecmp(base + n - 3, ".md"))
+				n -= 3;
+			if (n >= sizeof(title))
+				n = sizeof(title) - 1;
+			memcpy(title, base, n);
+			title[n] = '\0';
+			fprintf(o, "# %s\n", title);
+			fclose(o);
+		} else {
+			close(fd);
+		}
+	}
+	send_text(f, "200 OK", "application/json", "{\"ok\":true}", 11);
+}
+
+/* Remove a note or an empty directory. Directories go through rmdir, so a
+ * directory holding anything is refused — removing a tree is what a shell is
+ * for, where the consequences are visible. */
+static void
+remove_path(FILE *f, const char *rel)
+{
+	char abs[PATH_MAX];
+	int i;
+
+	i = find_node(rel);
+	if (i < 0 || nodes[i].type == T_MISSING || !*rel) {
+		send_text(f, "404 Not Found", "text/plain", "not found", 9);
+		return;
+	}
+	if (join_path(abs, sizeof(abs), repo_root, rel) < 0) {
+		send_text(f, "400 Bad Request", "text/plain", "bad path", 8);
+		return;
+	}
+	if (nodes[i].type == T_DIR) {
+		if (rmdir(abs) < 0) {
+			if (errno == ENOTEMPTY || errno == EEXIST)
+				send_text(f, "409 Conflict", "text/plain",
+				    "directory is not empty", 22);
+			else
+				send_text(f, "500 Internal Server Error", "text/plain",
+				    "cannot remove", 13);
+			return;
+		}
+	} else if (unlink(abs) < 0) {
+		send_text(f, "500 Internal Server Error", "text/plain", "cannot remove", 13);
+		return;
+	}
+	send_text(f, "200 OK", "application/json", "{\"ok\":true}", 11);
+}
+
+static void
+handle(int fd)
+{
+	FILE *f;
+	char line[2048], *path, *end, *query, *body = NULL;
+	long clen = 0, want_mtime = 0;
+	int is_put = 0, guarded = 0, method = 0;
+	enum { M_GET = 1, M_PUT, M_POST, M_DELETE };
+	size_t got = 0;
+
+	if (!(f = fdopen(fd, "r+"))) {
+		close(fd);
+		return;
+	}
+	if (!fgets(line, sizeof(line), f)) {
+		fclose(f);
+		return;
+	}
+	if (!strncmp(line, "PUT ", 4)) {
+		is_put = 1;
+		method = M_PUT;
+		path = line + 4;
+	} else if (!strncmp(line, "GET ", 4)) {
+		method = M_GET;
+		path = line + 4;
+	} else if (!strncmp(line, "POST ", 5)) {
+		method = M_POST;
+		path = line + 5;
+	} else if (!strncmp(line, "DELETE ", 7)) {
+		method = M_DELETE;
+		path = line + 7;
+	} else {
+		send_text(f, "405 Method Not Allowed", "text/plain", "unsupported", 11);
+		fclose(f);
+		return;
+	}
+	if (!(end = strchr(path, ' '))) {
+		fclose(f);
+		return;
+	}
+	*end = '\0';
+	if ((query = strchr(path, '?')))
+		*query++ = '\0';
+
+	if (method != M_GET) {
+		char hdr[2048];
+
+		while (fgets(hdr, sizeof(hdr), f)) {
+			if (!strcmp(hdr, "\r\n") || !strcmp(hdr, "\n"))
+				break;
+			if (!strncasecmp(hdr, "Content-Length:", 15))
+				clen = atol(hdr + 15);
+			/* A custom header cannot be sent cross-origin without a
+			 * preflight this server never answers, so requiring one
+			 * keeps another page on the machine from writing here. */
+			else if (!strncasecmp(hdr, "X-Graph-Write:", 14))
+				guarded = 1;
+		}
+		if (!guarded) {
+			send_text(f, "403 Forbidden", "text/plain", "missing write header", 20);
+			fclose(f);
+			return;
+		}
+		if (clen < 0 || clen > MAX_BODY) {
+			send_text(f, "413 Payload Too Large", "text/plain", "too large", 9);
+			fclose(f);
+			return;
+		}
+		if (is_put) {
+			if (!(body = malloc((size_t)clen + 1))) {
+				fclose(f);
+				return;
+			}
+			got = fread(body, 1, (size_t)clen, f);
+			body[got] = '\0';
+		}
+	}
+
+	/* Every request rescans: the filesystem is the source of truth, and at
+	 * this scale a walk is cheaper than any cache would be to keep honest. */
+	build();
+
+	if (method == M_POST) {
+		if (!strcmp(path, "/api/new") && query && !strncmp(query, "path=", 5)) {
+			char *amp = strchr(query, '&');
+			int as_dir = 0;
+
+			if (amp) {
+				*amp = '\0';
+				as_dir = !strcmp(amp + 1, "kind=dir");
+			}
+			url_decode(query + 5);
+			create_path(f, query + 5, as_dir);
+		} else {
+			send_text(f, "404 Not Found", "text/plain", "not found", 9);
+		}
+		fclose(f);
+		return;
+	}
+
+	if (method == M_DELETE) {
+		if (!strcmp(path, "/api/file") && query && !strncmp(query, "path=", 5)) {
+			url_decode(query + 5);
+			remove_path(f, query + 5);
+		} else {
+			send_text(f, "404 Not Found", "text/plain", "not found", 9);
+		}
+		fclose(f);
+		return;
+	}
+
+	if (is_put) {
+		if (!strcmp(path, "/api/file") && query && !strncmp(query, "path=", 5)) {
+			char *amp = strchr(query, '&');
+			if (amp) {
+				*amp = '\0';
+				if (!strncmp(amp + 1, "mtime=", 6))
+					want_mtime = atol(amp + 7);
+			}
+			url_decode(query + 5);
+			write_file(f, query + 5, want_mtime, body, got);
+		} else {
+			send_text(f, "404 Not Found", "text/plain", "not found", 9);
+		}
+		free(body);
+		fclose(f);
+		return;
+	}
+
+	if (!strcmp(path, "/")) {
+		send_text(f, "200 OK", "text/html; charset=utf-8",
+		    ui_html, strlen(ui_html));
+	} else if (!strcmp(path, "/api/graph")) {
+		send_graph(f);
+	} else if (!strcmp(path, "/api/search")) {
+		if (query && !strncmp(query, "q=", 2)) {
+			url_decode(query + 2);
+			send_search(f, query + 2);
+		} else {
+			send_text(f, "400 Bad Request", "text/plain", "no query", 8);
+		}
+	} else if (!strcmp(path, "/api/raw")) {
+		if (query && !strncmp(query, "path=", 5)) {
+			url_decode(query + 5);
+			send_raw(f, query + 5);
+		} else {
+			send_text(f, "400 Bad Request", "text/plain", "no path", 7);
+		}
+	} else if (!strcmp(path, "/api/file")) {
+		if (query && !strncmp(query, "path=", 5)) {
+			url_decode(query + 5);
+			send_file(f, query + 5);
+		} else {
+			send_text(f, "400 Bad Request", "text/plain", "no path", 7);
+		}
+	} else {
+		send_text(f, "404 Not Found", "text/plain", "not found", 9);
+	}
+	fclose(f);
+}
+
+static int
+listen_local(int port)
+{
+	struct sockaddr_in a;
+	int fd, yes = 1;
+
+	if ((fd = socket(AF_INET, SOCK_STREAM, 0)) < 0)
+		die("socket: %s", strerror(errno));
+	setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+
+	memset(&a, 0, sizeof(a));
+	a.sin_family = AF_INET;
+	a.sin_port = htons((unsigned short)port);
+	a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+	if (bind(fd, (struct sockaddr *)&a, sizeof(a)) < 0)
+		die("cannot bind 127.0.0.1:%d: %s", port, strerror(errno));
+	if (listen(fd, 16) < 0)
+		die("listen: %s", strerror(errno));
+	return fd;
+}
+
+int
+cmd_display(int argc, char *argv[])
+{
+	const char *path = NULL;
+	int port = 7373, i, srv, fd, notes;
+
+	for (i = 0; i < argc; i++) {
+		if (!strcmp(argv[i], "--port") && i + 1 < argc)
+			port = atoi(argv[++i]);
+		else if (!path)
+			path = argv[i];
+		else
+			path = NULL;
+	}
+	if (!path || port <= 0 || port > 65535) {
+		fputs("usage: graph display <path> [--port <port>]\n", stderr);
+		return 1;
+	}
+	if (!realpath(path, repo_root))
+		die("cannot resolve %s: %s", path, strerror(errno));
+	if (!is_graph_repo(repo_root))
+		die("%s is not a Graph repository", repo_root);
+
+	signal(SIGPIPE, SIG_IGN);	/* a browser that walks away is not fatal */
+
+	build();
+	for (i = 0, notes = 0; i < nnodes; i++)
+		if (nodes[i].type == T_NOTE)
+			notes++;
+	srv = listen_local(port);
+	printf("%s\n", repo_root);
+	printf("%d notes, %d links — http://127.0.0.1:%d\n", notes, nedges, port);
+	fflush(stdout);
+
+	for (;;) {
+		if ((fd = accept(srv, NULL, NULL)) < 0) {
+			if (errno == EINTR)
+				continue;
+			break;
+		}
+		handle(fd);
+	}
+	close(srv);
+	return 0;
+}

@@ -13,7 +13,8 @@ usage(FILE *out)
 	    "usage: graph <command> [args]\n"
 	    "\n"
 	    "commands:\n"
-	    "  init <path>    create a Graph repository\n"
+	    "  init <path>              create a Graph repository\n"
+	    "  display <path> [--port]  serve a local view of a repository\n"
 	    "\n"
 	    "  -v, --version  print version\n"
 	    "  -h, --help     print this message\n",
@@ -41,6 +42,8 @@ main(int argc, char *argv[])
 	}
 	if (!strcmp(cmd, "init"))
 		return cmd_init(argc - 2, argv + 2);
+	if (!strcmp(cmd, "display"))
+		return cmd_display(argc - 2, argv + 2);
 
 	warn("unknown command: %s", cmd);
 	usage(stderr);

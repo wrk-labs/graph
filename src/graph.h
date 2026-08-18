@@ -19,6 +19,7 @@
 
 /* commands */
 int cmd_init(int argc, char *argv[]);
+int cmd_display(int argc, char *argv[]);
 
 /* util.c */
 void die(const char *fmt, ...);

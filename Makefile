@@ -15,7 +15,7 @@ endif
 CFLAGS  += -std=c99 -pedantic -Wall -Wextra -Os \
            -D_XOPEN_SOURCE=700 -DVERSION=\"$(VERSION)\"
 
-SRC = src/graph.c src/init.c src/util.c
+SRC = src/graph.c src/init.c src/display.c src/util.c
 OBJ = $(SRC:.c=.o)
 BIN = graph
 
@@ -25,12 +25,17 @@ all: $(BIN)
 	$(CC) -c $(CFLAGS) -o $@ $<
 
 $(OBJ): src/graph.h
+src/display.o: src/ui.h
+
+# UI is authored as HTML and embedded so the binary stays self-contained.
+src/ui.h: src/ui.html tools/embed.sh
+	sh tools/embed.sh src/ui.html ui_html > $@
 
 $(BIN): $(OBJ)
 	$(CC) -o $@ $(OBJ) $(LDFLAGS)
 
 clean:
-	rm -f $(BIN) $(OBJ)
+	rm -f $(BIN) $(OBJ) src/ui.h
 
 install: $(BIN)
 	mkdir -p $(DESTDIR)$(PREFIX)/bin
