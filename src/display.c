@@ -18,6 +18,7 @@
 #include <strings.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include "graph.h"
@@ -857,22 +858,65 @@ listen_local(int port)
 	return fd;
 }
 
+/* Hand the URL to the desktop's opener from a detached child. Best effort:
+ * no opener, no display or a failing one must not take the server down, so
+ * every error is swallowed and the URL is printed regardless. */
+static void
+open_browser(const char *url)
+{
+	const char *cmd;
+	pid_t pid;
+
+	if ((cmd = getenv("BROWSER")) && !*cmd)
+		cmd = NULL;
+	if (!cmd) {
+#ifdef __APPLE__
+		cmd = "open";
+#else
+		if (!getenv("DISPLAY") && !getenv("WAYLAND_DISPLAY"))
+			return;
+		cmd = "xdg-open";
+#endif
+	}
+	if ((pid = fork()) < 0)
+		return;
+	if (pid > 0) {
+		waitpid(pid, NULL, 0);	/* the grandchild is what runs */
+		return;
+	}
+	if (fork() > 0)
+		_exit(0);
+	{
+		int nul = open("/dev/null", O_RDWR);
+		if (nul >= 0) {
+			dup2(nul, 0); dup2(nul, 1); dup2(nul, 2);
+			if (nul > 2)
+				close(nul);
+		}
+	}
+	execlp(cmd, cmd, url, (char *)NULL);
+	_exit(127);
+}
+
 int
 cmd_display(int argc, char *argv[])
 {
 	const char *path = NULL;
-	int port = 7373, i, srv, fd, notes;
+	char url[64];
+	int port = 7373, i, srv, fd, notes, launch = 1;
 
 	for (i = 0; i < argc; i++) {
 		if (!strcmp(argv[i], "--port") && i + 1 < argc)
 			port = atoi(argv[++i]);
+		else if (!strcmp(argv[i], "--no-open"))
+			launch = 0;
 		else if (!path)
 			path = argv[i];
 		else
 			path = NULL;
 	}
 	if (!path || port <= 0 || port > 65535) {
-		fputs("usage: graph display <path> [--port <port>]\n", stderr);
+		fputs("usage: graph display <path> [--port <port>] [--no-open]\n", stderr);
 		return 1;
 	}
 	if (!realpath(path, repo_root))
@@ -887,9 +931,12 @@ cmd_display(int argc, char *argv[])
 		if (nodes[i].type == T_NOTE)
 			notes++;
 	srv = listen_local(port);
+	snprintf(url, sizeof(url), "http://127.0.0.1:%d", port);
 	printf("%s\n", repo_root);
-	printf("%d notes, %d links — http://127.0.0.1:%d\n", notes, nedges, port);
+	printf("%d notes, %d links — %s\n", notes, nedges, url);
 	fflush(stdout);
+	if (launch)
+		open_browser(url);	/* only once we know the port is ours */
 
 	for (;;) {
 		if ((fd = accept(srv, NULL, NULL)) < 0) {
