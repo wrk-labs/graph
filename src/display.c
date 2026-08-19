@@ -836,25 +836,42 @@ handle(int fd)
 	fclose(f);
 }
 
+/* Bind the loopback port. With tries > 1 a busy port is not an error: walk
+ * upwards until one is free, and report which in *port. An explicit --port
+ * passes tries = 1, since a port someone asked for by number should not be
+ * quietly swapped for another. */
 static int
-listen_local(int port)
+listen_local(int *port, int tries)
 {
 	struct sockaddr_in a;
-	int fd, yes = 1;
+	int fd, yes = 1, p = *port, last = p + tries - 1;
 
-	if ((fd = socket(AF_INET, SOCK_STREAM, 0)) < 0)
-		die("socket: %s", strerror(errno));
-	setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+	if (last > 65535)
+		last = 65535;
+	for (;;) {
+		if ((fd = socket(AF_INET, SOCK_STREAM, 0)) < 0)
+			die("socket: %s", strerror(errno));
+		setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
 
-	memset(&a, 0, sizeof(a));
-	a.sin_family = AF_INET;
-	a.sin_port = htons((unsigned short)port);
-	a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+		memset(&a, 0, sizeof(a));
+		a.sin_family = AF_INET;
+		a.sin_port = htons((unsigned short)p);
+		a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 
-	if (bind(fd, (struct sockaddr *)&a, sizeof(a)) < 0)
-		die("cannot bind 127.0.0.1:%d: %s", port, strerror(errno));
+		if (bind(fd, (struct sockaddr *)&a, sizeof(a)) == 0)
+			break;
+		if (errno != EADDRINUSE || p >= last) {
+			if (tries > 1)
+				die("cannot bind 127.0.0.1:%d-%d: %s", *port, last,
+				    strerror(errno));
+			die("cannot bind 127.0.0.1:%d: %s", p, strerror(errno));
+		}
+		close(fd);
+		p++;
+	}
 	if (listen(fd, 16) < 0)
 		die("listen: %s", strerror(errno));
+	*port = p;
 	return fd;
 }
 
@@ -903,11 +920,13 @@ cmd_display(int argc, char *argv[])
 {
 	const char *path = NULL;
 	char url[64];
-	int port = 7373, i, srv, fd, notes, launch = 1;
+	int port = 7373, i, srv, fd, notes, launch = 1, tries = 20;
 
 	for (i = 0; i < argc; i++) {
-		if (!strcmp(argv[i], "--port") && i + 1 < argc)
+		if (!strcmp(argv[i], "--port") && i + 1 < argc) {
 			port = atoi(argv[++i]);
+			tries = 1;
+		}
 		else if (!strcmp(argv[i], "--no-open"))
 			launch = 0;
 		else if (!path)
@@ -930,7 +949,7 @@ cmd_display(int argc, char *argv[])
 	for (i = 0, notes = 0; i < nnodes; i++)
 		if (nodes[i].type == T_NOTE)
 			notes++;
-	srv = listen_local(port);
+	srv = listen_local(&port, tries);
 	snprintf(url, sizeof(url), "http://127.0.0.1:%d", port);
 	printf("%s\n", repo_root);
 	printf("%d notes, %d links — %s\n", notes, nedges, url);
