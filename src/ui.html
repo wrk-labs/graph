@@ -1781,6 +1781,9 @@ var VIM = {
   reg: "", regLine: false,
   cmd: null,          /* ":" or "/" buffer, null when not entering one */
   undo: [], redo: [],
+  anchor: undefined,  /* visual mode: where the selection started */
+  cur: 0,             /* visual mode: the moving end (selectionStart is the
+                         lower end of the highlight, not the cursor) */
   lastSearch: ""
 };
 
@@ -1792,9 +1795,12 @@ function lineEnd(v, p) { var i = v.indexOf("\n", p); return i < 0 ? v.length : i
 function colOf(v, p) { return p - lineStart(v, p); }
 
 function snapshot() {
-  VIM.undo.push({v: vv(), p: ta().selectionStart});
+  var top = VIM.undo[VIM.undo.length - 1];
+  if (top && top.v === vv()) return;    /* nothing changed since last time */
+  VIM.undo.push({v: vv(), p: pos()});
   if (VIM.undo.length > 200) VIM.undo.shift();
   VIM.redo = [];
+  VIM.snapped = true;
 }
 function applyUndo(from, to) {
   if (!from.length) return;
@@ -1808,6 +1814,20 @@ function applyUndo(from, to) {
 function setPos(p) {
   var t = ta(), v = t.value;
   p = Math.max(0, Math.min(v.length, p));
+  if (VIM.mode === "visual" || VIM.mode === "vline") {
+    /* the highlight runs from the anchor to the cursor; a textarea cannot
+     * show which end is which, so remember the cursor ourselves */
+    VIM.cur = p;
+    var an = VIM.anchor === undefined ? p : VIM.anchor;
+    var a = Math.min(an, p), b = Math.max(an, p) + 1;
+    if (VIM.mode === "vline") { a = lineStart(v, a); b = lineEnd(v, b - 1) + 1; }
+    t.selectionStart = a;
+    t.selectionEnd = Math.min(v.length, b);
+    if (typeof scrollCaret === "function") scrollCaret();
+    if (typeof gutter === "function") gutter();
+    if (typeof previewSync === "function") previewSync();
+    return;
+  }
   t.selectionStart = p;
   /* block cursor: normal mode keeps one character selected so the caret is
    * visible as a cell rather than a bar */
@@ -1817,7 +1837,9 @@ function setPos(p) {
   if (typeof gutter === "function") gutter();
   if (typeof previewSync === "function") previewSync();
 }
-function pos() { return ta().selectionStart; }
+function pos() {
+  return VIM.mode === "visual" || VIM.mode === "vline" ? VIM.cur : ta().selectionStart;
+}
 
 /* ---- motions ---- */
 function motion(k, p, cnt) {
@@ -1907,7 +1929,14 @@ function openLine(below) {
 }
 
 function setMode(m) {
+  var p = pos();
+  var wasInsert = VIM.mode === "insert";
   VIM.mode = m;
+  if (m !== "visual" && m !== "vline") VIM.anchor = undefined;
+  /* one undo step per stretch of typing, like vim: snapshot on the way in
+   * unless the caller (c, o, O) already took one for its own edit */
+  if (m === "insert" && !wasInsert && !VIM.snapped) snapshot();
+  VIM.snapped = false;
   setTimeout(hints, 0);
   VIM.pend = ""; VIM.count = ""; VIM.g = false;
   var el = document.querySelector(".edbar .mode");
@@ -1915,7 +1944,7 @@ function setMode(m) {
     el.textContent = m === "vline" ? "V-LINE" : m.toUpperCase();
     el.className = "mode " + m;
   }
-  setPos(pos());
+  setPos(p);
 }
 function showCmd() {
   var el = document.querySelector(".edbar .cmdline");
@@ -1990,6 +2019,7 @@ function vimKey(ev) {
 
   var visual = VIM.mode === "visual" || VIM.mode === "vline";
   var anchor = VIM.anchor === undefined ? pos() : VIM.anchor;
+  VIM.snapped = false;   /* per keypress: did an edit already take a snapshot */
 
   if (k === "Escape") { setMode("normal"); return true; }
   if (k >= "0" && k <= "9" && !(k === "0" && !VIM.count)) { VIM.count += k; return true; }
@@ -2012,13 +2042,13 @@ function vimKey(ev) {
   case "o": openLine(true); return true;
   case "O": openLine(false); return true;
 
-  case "x":
-    if (visual) { cut(anchor, pos() + 1, VIM.mode === "vline"); setMode("normal"); return true; }
-    cut(pos(), Math.min(vv().length, pos() + cnt));
-    return true;
   case "D": cut(pos(), lineEnd(vv(), pos())); return true;
   case "C": cut(pos(), lineEnd(vv(), pos())); setMode("insert"); return true;
 
+  case "x":
+    if (!visual) { cut(pos(), Math.min(vv().length, pos() + cnt)); return true; }
+    k = "d";
+    /* fall through: visual x is d */
   case "d": case "y": case "c":
     if (visual) {
       var v0 = vv(), a = Math.min(anchor, pos()), b = Math.max(anchor, pos()) + 1;
@@ -2041,8 +2071,8 @@ function vimKey(ev) {
   case "P": paste(false); return true;
   case "u": applyUndo(VIM.undo, VIM.redo); return true;
 
-  case "v": setMode("visual"); VIM.anchor = pos(); return true;
-  case "V": setMode("vline"); VIM.anchor = pos(); return true;
+  case "v": VIM.anchor = pos(); setMode("visual"); return true;
+  case "V": VIM.anchor = pos(); setMode("vline"); return true;
 
   case ":": VIM.cmd = ":"; showCmd(); return true;
   case "/": VIM.cmd = "/"; showCmd(); return true;
@@ -2063,11 +2093,6 @@ function moveOrOp(k, cnt, visual, anchor) {
   }
   VIM.count = "";
   setPos(to);
-  if (visual) {
-    var t = ta();
-    t.selectionStart = Math.min(anchor, to);
-    t.selectionEnd = Math.max(anchor, to) + 1;
-  }
   return true;
 }
 
