@@ -56,6 +56,74 @@ header {
   flex: none; height: 42px; display: flex; align-items: center; gap: 14px;
   padding: 0 14px; background: var(--panel); border-bottom: 1px solid var(--line);
 }
+
+/* == disconnected ==
+ * A stopped server leaves a page that is a snapshot: every command from here
+ * fails, so this covers the app rather than annotating it. Dismiss demotes it
+ * to a strip — reading and copying what is already on screen is the one thing
+ * that still works, and trapping someone away from it helps nobody.
+ *
+ * Deliberately not the editor's status line: that single element carries
+ * "changed on disk — :w! to overwrite", and losing that message behind a
+ * transport one is how an edit gets overwritten by surprise. */
+#offline {
+  position: fixed; inset: 0; z-index: 90;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(6, 9, 10, .74);
+  -webkit-backdrop-filter: blur(2px); backdrop-filter: blur(2px);
+}
+#offline .sheet {
+  width: 560px; max-width: calc(100vw - 48px);
+  background: var(--panel); border: 1px solid var(--line);
+  border-top: 3px solid var(--alert); border-radius: 6px;
+  padding: 20px 22px 18px; box-shadow: 0 24px 64px rgba(0, 0, 0, .6);
+}
+#offline .title {
+  color: var(--alert); font-weight: 600; font-size: 13px;
+  letter-spacing: .4px; text-transform: uppercase; margin-bottom: 8px;
+}
+#offline .msg { color: var(--read); margin: 0 0 16px; line-height: 1.6; }
+#offline .rescue {
+  border-top: 1px solid var(--line); padding-top: 14px; margin-bottom: 16px;
+}
+#offline .rescue[hidden] { display: none; }
+#offline .warn { color: var(--accent); margin: 0 0 10px; line-height: 1.6; }
+#offline .buf {
+  width: 100%; height: 130px; resize: vertical; box-sizing: border-box;
+  font: 11px/1.5 var(--mono); color: var(--text); background: var(--bg);
+  border: 1px solid var(--line); border-radius: 3px; padding: 8px; margin-bottom: 8px;
+}
+#offline .acts { display: flex; gap: 8px; align-items: center; }
+#offline button {
+  font: inherit; font-weight: 600; cursor: pointer; border-radius: 3px;
+  padding: 5px 14px; border: 1px solid var(--line);
+  background: var(--raised); color: var(--text);
+}
+#offline button:hover { background: var(--hi); color: var(--read); }
+#offline .retry { background: var(--alert); border-color: var(--alert); color: #180d0c; }
+#offline .retry:hover { background: #f06a62; color: #180d0c; }
+#offline .dismiss { margin-left: auto; }
+
+/* dismissed: usable again, but never looking live */
+#offline.min {
+  position: static; display: block; background: none;
+  -webkit-backdrop-filter: none; backdrop-filter: none; flex: none;
+}
+#offline.min .sheet {
+  width: auto; max-width: none; border: 0; border-radius: 0; box-shadow: none;
+  padding: 7px 14px; background: var(--alert);
+  display: flex; align-items: center; gap: 12px;
+}
+#offline.min .title, #offline.min .rescue, #offline.min .dismiss { display: none; }
+#offline.min .msg {
+  flex: 1; margin: 0; color: #180d0c; font-weight: 600; letter-spacing: .2px;
+}
+#offline.min .acts { margin: 0; }
+#offline.min .retry { background: #180d0c; border-color: #180d0c; color: var(--alert); }
+#offline.min .retry:hover { background: #000; }
+/* last, and after .min: the two selectors weigh the same, so a dismissed
+ * banner that is then hidden must not come back on the order of the rules */
+#offline[hidden] { display: none; }
 header .mark { color: var(--accent); font-weight: 700; letter-spacing: 2.5px; }
 header .root { color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 header .grow { flex: 1; }
@@ -350,6 +418,23 @@ table.ls td.zero { color: var(--ghost); }
 </head>
 <body>
 
+<div id="offline" hidden>
+  <div class="sheet" role="alertdialog" aria-modal="true" aria-labelledby="off-title">
+    <div class="title" id="off-title"></div>
+    <p class="msg"></p>
+    <div class="rescue" hidden>
+      <p class="warn">This note has unsaved changes and there is nowhere to save
+        them. Copy the text somewhere safe before reloading.</p>
+      <textarea class="buf" readonly spellcheck="false"></textarea>
+      <button type="button" class="copy">copy unsaved text</button>
+    </div>
+    <div class="acts">
+      <button type="button" class="retry">retry</button>
+      <button type="button" class="dismiss">dismiss and keep reading</button>
+    </div>
+  </div>
+</div>
+
 <header>
   <span class="mark">GRAPH</span>
   <span class="root" id="root">—</span>
@@ -612,22 +697,25 @@ function folder(x) {
   });
   if (rd)
     fetch("/api/file?path=" + encodeURIComponent(rd.path))
+      .then(checkLive)
       .then(function (r) { return r.text(); })
       .then(function (t) {
         var b = $("#rdbody");
         if (b) { mdBase = x.path; b.innerHTML = md(t); wire(b); }
-      });
+      })
+      .catch(onFail());
 }
 
 function note(x) {
   $("#pane").innerHTML = "<div class='prose' id='body'><p><em>reading…</em></p></div>";
   fetch("/api/file?path=" + encodeURIComponent(x.path))
+    .then(checkLive)
     .then(function (r) { return r.ok ? r.text() : Promise.reject(); })
     .then(function (t) {
       var b = $("#body");
       if (b) { mdBase = parentOf(x.path); b.innerHTML = md(t); wire(b); }
     })
-    .catch(function () { $("#body").innerHTML = "<p><em>unreadable</em></p>"; });
+    .catch(onFail(function () { $("#body").innerHTML = "<p><em>unreadable</em></p>"; }));
 }
 
 function extOf(p) {
@@ -653,20 +741,22 @@ function other(x) {
   }
   if (e === "csv" || e === "tsv") {
     fetch("/api/file?path=" + encodeURIComponent(x.path))
+      .then(checkLive)
       .then(function (r) { return r.text(); })
       .then(function (t) { pane.innerHTML = csvTable(t, e === "tsv" ? "\t" : ","); })
-      .catch(function () { pane.innerHTML = "<div class='prose'><p><em>unreadable</em></p></div>"; });
+      .catch(onFail(function () { pane.innerHTML = "<div class='prose'><p><em>unreadable</em></p></div>"; }));
     return;
   }
   if (["txt", "log", "conf", "ini", "json", "yaml", "yml", "sh", "c", "h", "py", "js"].indexOf(e) >= 0) {
     fetch("/api/file?path=" + encodeURIComponent(x.path))
+      .then(checkLive)
       .then(function (r) { return r.text(); })
       .then(function (t) {
         pane.innerHTML = "<div class='prose'><div class='codeblock'>" +
           (e ? "<span class='lang'>" + esc(e) + "</span>" : "") +
           "<pre><code>" + highlight(t, e) + "</code></pre></div></div>";
       })
-      .catch(function () { pane.innerHTML = "<div class='prose'><p><em>unreadable</em></p></div>"; });
+      .catch(onFail(function () { pane.innerHTML = "<div class='prose'><p><em>unreadable</em></p></div>"; }));
     return;
   }
   pane.innerHTML = "<div class='prose'><p><em>" + esc(x.name) +
@@ -1237,19 +1327,20 @@ function resolveNew(arg) {
 
 function api(method, url) {
   return fetch(url, {method: method, headers: {"X-Graph-Write": "1"}})
+    .then(checkLive)
     .then(function (r) {
       return r.text().then(function (t) { return {ok: r.ok, status: r.status, body: t}; });
     });
 }
 
 function afterChange(openPath, editIt) {
-  fetch("/api/graph").then(function (r) { return r.json(); }).then(function (d) {
+  fetch("/api/graph").then(checkLive).then(function (r) { return r.json(); }).then(function (d) {
     G = d;
     build();
     var j = openPath ? idx(openPath) : -1;
     show(j >= 0 ? j : Math.max(0, idx("") >= 0 ? idx("") : 0));
     if (editIt && j >= 0 && N[j].type === "note") edit(N[j]);
-  });
+  }).catch(offline);
 }
 
 /* Report where the command was typed, not in the dim corner: the message
@@ -1276,7 +1367,7 @@ function runBrowseCmd(c) {
       if (!r.ok) return flash(r.body || ("failed (" + r.status + ")"), 1);
       flash("created " + path);
       afterChange(path, true);
-    }).catch(function () { flash("could not reach the server", 1); });
+    }).catch(offline);
     return;
   }
   if (verb === "mkdir") {
@@ -1286,7 +1377,7 @@ function runBrowseCmd(c) {
       if (!r.ok) return flash(r.body || ("failed (" + r.status + ")"), 1);
       flash("created " + dir + "/");
       afterChange(dir, false);
-    }).catch(function () { flash("could not reach the server", 1); });
+    }).catch(offline);
     return;
   }
   if (verb === "rm" || verb === "rmdir") {
@@ -1303,7 +1394,7 @@ function runBrowseCmd(c) {
       if (!r.ok) return flash(r.body || ("failed (" + r.status + ")"), 1);
       flash("deleted " + target);
       afterChange(up, false);
-    }).catch(function () { flash("could not reach the server", 1); });
+    }).catch(offline);
     return;
   }
   flash("unknown command: " + verb, 1);
@@ -1390,7 +1481,7 @@ function openWith(x) {
   api("POST", "/api/open?path=" + encodeURIComponent(x.path)).then(function (r) {
     if (r.ok) flash("opened " + (x.name || "/"));
     else flash(r.body || "cannot open", 1);
-  });
+  }).catch(offline);
 }
 
 /* Line numbers.
@@ -1479,6 +1570,7 @@ var ED = {on: false, node: -1, mtime: 0, original: "", acItems: [], acSel: 0,
 
 function edit(x) {
   fetch("/api/file?path=" + encodeURIComponent(x.path))
+    .then(checkLive)
     .then(function (r) {
       if (!r.ok) throw new Error("read");
       return r.text();
@@ -1489,7 +1581,7 @@ function edit(x) {
        * below and mislabelled as a failure to read the file. */
       setTimeout(function () { openEditor(x, t); }, 0);
     })
-    .catch(function () { setState("could not read file", "err"); });
+    .catch(onFail(function () { setState("could not read file", "err"); }));
 }
 
 function setState(msg, cls) {
@@ -1766,7 +1858,7 @@ function save(force) {
     method: "PUT",
     headers: {"X-Graph-Write": "1", "Content-Type": "text/plain; charset=utf-8"},
     body: ta.value
-  }).then(function (r) {
+  }).then(checkLive).then(function (r) {
     if (r.status === 409) {
       setState("changed on disk — :w! to overwrite, :q! to discard", "err");
       return null;
@@ -1782,7 +1874,13 @@ function save(force) {
     /* the link graph may have changed, so take a fresh scan */
     reload(x.path);
     return true;
-  }).catch(function () { setState("save failed", "err"); return false; });
+  }).catch(function (e) {
+    /* The text is in the textarea and stays there: a save that never reached
+     * the server must not read as a save that was refused. */
+    if (isTransport(e)) { offline(e); setState("save failed — server unreachable, buffer kept", "err"); }
+    else setState("save failed", "err");
+    return false;
+  });
 }
 
 function cancel() {
@@ -1793,14 +1891,122 @@ function cancel() {
   show(ED.node);
 }
 
+/* ---------- connection ----------
+ * The server dies with the window that started it, so this page can outlive
+ * it and go on looking perfectly alive: the tree is drawn, the notes are
+ * there, and nothing says the next click will do nothing.
+ *
+ * Nothing polls. The refresh below already asks the server on every return
+ * to the window, and every command asks it too, so a stopped server is found
+ * at exactly the moments it begins to matter. A timer would only add a second
+ * and worse signal beside those, and this server answers one request at a
+ * time — a heartbeat per open tab is a heartbeat the repository pays for.
+ *
+ * Two dead states, not one. No answer at all means the server stopped. A 401
+ * means it answered but this page belongs to an earlier run: the token cookie
+ * is named per port, so a fresh `graph display` on the same port leaves an
+ * old tab holding a token that is refused. The two need different advice.
+ *
+ * The banner latches. A stopped server does not come back on its own, so
+ * unlike flash() this stays until a request succeeds again. */
+var DEAD = null;                /* null | "gone" | "stale" */
+
+/* Said in terms of the application, not the server behind it. The server is
+ * started with --exit-with-parent, so it stops because the Graph window was
+ * closed — and whoever closed it may well have opened Graph from a launcher
+ * and never typed a command in their life. */
+var SAYS = {
+  gone: {
+    title: "graph is not running",
+    msg: "Closing the Graph window stops the server behind this page. What is " +
+         "left is a snapshot: the notes are as they were loaded, and nothing " +
+         "done here reaches the repository. Open Graph again to carry on."
+  },
+  stale: {
+    /* The cookie is named per port, so the window Graph has open now — if it
+     * took this same port — replaces the token this page is refused for, and
+     * the refresh on return then finds its way back without anyone retrying. */
+    title: "an earlier session",
+    msg: "Graph is running, but this page is left over from an earlier " +
+         "session and the token it carries is no longer accepted. Switch to " +
+         "the window Graph has open now; this page recovers on its own when " +
+         "you come back to it."
+  }
+};
+
+/* The buffer is the only thing here that exists nowhere else, so a modal that
+ * covers the page has to hand it back before it asks anyone to reload. */
+function unsaved() {
+  var ta = $("#edtext");
+  return ED.on && ta && ta.value !== ED.original ? ta.value : null;
+}
+
+function markDead(kind) {
+  if (DEAD === kind) return;
+  DEAD = kind;
+  var el = $("#offline"), text = unsaved();
+  el.classList.remove("min");
+  el.querySelector(".title").textContent = SAYS[kind].title;
+  el.querySelector(".msg").textContent = SAYS[kind].msg;
+  el.querySelector(".rescue").hidden = text === null;
+  if (text !== null) el.querySelector(".buf").value = text;
+  el.hidden = false;
+  el.querySelector(text !== null ? ".copy" : ".retry").focus();
+}
+
+function markLive() {
+  if (DEAD === null) return;
+  DEAD = null;
+  var el = $("#offline");
+  el.hidden = true;
+  el.classList.remove("min");
+}
+
+/* Covering the page is only half of it: the app's key handlers are on
+ * document, so without this the editor would go on accepting text behind the
+ * sheet. Anything inside the sheet still works, which is what lets the buffer
+ * be selected and copied. */
+function blocking() {
+  var el = $("#offline");
+  return DEAD !== null && !el.hidden && !el.classList.contains("min");
+}
+
+function offline(e) { markDead(e && e.graphStale ? "stale" : "gone"); }
+
+/* A rejected fetch never reached anyone, so the file is not what failed —
+ * the connection is. Anything else is the server answering, and the caller's
+ * own message is the better one. */
+function isTransport(e) {
+  return !!e && (e.graphStale || e instanceof TypeError);
+}
+function onFail(fallback) {
+  return function (e) {
+    if (isTransport(e)) return offline(e);
+    if (fallback) return fallback(e);
+    throw e;            /* not the connection, so it is a bug: let it surface */
+  };
+}
+
+/* Status before body. A 401 answers in prose, not JSON, so letting it reach
+ * .json() would turn a state we can name into a parse error we cannot. */
+function checkLive(r) {
+  if (r.status === 401 || r.status === 403) {
+    var e = new Error("stale session");
+    e.graphStale = true;
+    throw e;
+  }
+  markLive();
+  return r;
+}
+
 function reload(keepPath) {
-  fetch("/api/graph").then(function (r) { return r.json(); }).then(function (d) {
+  fetch("/api/graph").then(checkLive).then(function (r) { return r.json(); }).then(function (d) {
     G = d;
     build();
     var j = idx(keepPath);
     if (ED.on) { navTree(); if (j >= 0) ED.node = j; }
     else show(j >= 0 ? j : 0);
-  });
+  }).catch(offline);
 }
 
 /* The files are the source of truth, and they change behind the page's
@@ -1815,7 +2021,7 @@ function refresh() {
   if ($("#doc").classList.contains("editing")) return;
   var keep = cur >= 0 ? N[cur].path : null;
   var was = cur >= 0 ? N[cur].mtime + ":" + N[cur].size : "";
-  fetch("/api/graph").then(function (r) { return r.json(); }).then(function (d) {
+  fetch("/api/graph").then(checkLive).then(function (r) { return r.json(); }).then(function (d) {
     if (ED.on) return;
     G = d;
     build();
@@ -1825,7 +2031,7 @@ function refresh() {
     cur = j;
     if (N[j].mtime + ":" + N[j].size !== was || N[j].type === "dir") show(j, true);
     else reveal(N[j].path);
-  }).catch(function () {});
+  }).catch(offline);
 }
 /* Mid-edit the buffer is sacred, but the tree can still follow the disk,
  * and if the very note being edited has changed there it is better said
@@ -1833,7 +2039,7 @@ function refresh() {
 function refreshEditing() {
   var x = N[ED.node], path = x ? x.path : null;
   if (path === null) return;
-  fetch("/api/graph").then(function (r) { return r.json(); }).then(function (d) {
+  fetch("/api/graph").then(checkLive).then(function (r) { return r.json(); }).then(function (d) {
     if (!ED.on) return;
     G = d;
     build();
@@ -1845,12 +2051,32 @@ function refreshEditing() {
       ED.stale = true;
       setState("changed on disk — :w! to overwrite, :q! to discard", "err");
     }
-  }).catch(function () {});
+  }).catch(offline);
 }
 function refreshSoon() {
   clearTimeout(refreshTimer);
   refreshTimer = setTimeout(refresh, 150);
 }
+$("#offline").addEventListener("click", function (ev) {
+  var t = ev.target;
+  if (t.classList.contains("retry")) return refresh();
+  if (t.classList.contains("dismiss")) return $("#offline").classList.add("min");
+  if (t.classList.contains("copy")) {
+    var ta = $("#offline .buf");
+    ta.select();
+    var done = function (ok) { t.textContent = ok ? "copied" : "press ctrl-c"; };
+    if (navigator.clipboard && navigator.clipboard.writeText)
+      navigator.clipboard.writeText(ta.value).then(function () { done(1); },
+                                                   function () { done(0); });
+    else done(0);
+  }
+});
+document.addEventListener("keydown", function (ev) {
+  if (!blocking()) return;
+  if ($("#offline").contains(ev.target)) return;
+  ev.stopPropagation();
+  ev.preventDefault();
+}, true);
 window.addEventListener("focus", refreshSoon);
 document.addEventListener("visibilitychange", function () {
   if (document.visibilityState === "visible") refreshSoon();
@@ -2250,6 +2476,7 @@ document.addEventListener("keydown", function (ev) {
 
 function runSearch(q) {
   fetch("/api/search?q=" + encodeURIComponent(q))
+    .then(checkLive)
     .then(function (r) { return r.json(); })
     .then(function (d) {
       var h = "<h3>" + d.n + " match" + (d.n === 1 ? "" : "es") + " for “" + esc(q) + "”</h3>";
@@ -2278,12 +2505,13 @@ function runSearch(q) {
           }
         };
       });
-    });
+    })
+    .catch(onFail());
 }
 
 /* ---------- boot ---------- */
 window.addEventListener("resize", hints);
-fetch("/api/graph").then(function (r) { return r.json(); }).then(function (d) {
+fetch("/api/graph").then(checkLive).then(function (r) { return r.json(); }).then(function (d) {
   G = d;
   $("#root").textContent = d.root;
   build();
@@ -2291,7 +2519,7 @@ fetch("/api/graph").then(function (r) { return r.json(); }).then(function (d) {
   navTree();
   var start = idx("README.md");
   show(start >= 0 ? start : 0);
-});
+}).catch(offline);
 </script>
 </body>
 </html>
