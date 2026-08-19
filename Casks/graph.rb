@@ -7,7 +7,7 @@ cask "graph" do
 
   url "https://github.com/wrk-labs/graph/releases/download/v#{version}/graph-#{version}-darwin-arm64.tar.gz"
   name "graph"
-  desc "Filesystem repository shared over SMB"
+  desc "Personal knowledge hub"
   homepage "https://wrklabs.org/graph"
 
   depends_on macos: ">= :monterey"

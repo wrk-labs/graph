@@ -1,4 +1,4 @@
-# graph - filesystem repository over SMB
+# graph - personal knowledge hub
 # See LICENSE file for copyright and license details.
 
 # Version lives in the VERSION file (single source of truth).

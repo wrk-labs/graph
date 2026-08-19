@@ -1,8 +1,9 @@
 # Graph
 
-Graph turns a directory into a repository for the things you keep — documents,
-records, notes, media, whatever else accumulates — and serves it over SMB so you
-can reach it from any machine you own.
+Graph is a personal knowledge hub. It turns a directory into a repository for
+the things you keep — people, organizations, finances, research, notes, media,
+whatever accumulates — shows it as one connected whole, and serves it over SMB
+so you can reach it from any machine you own.
 
 The repository is a plain directory tree. Open it in a file manager, edit it in
 your editor, back it up with the tools you already use, or read it on a machine

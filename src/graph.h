@@ -1,5 +1,5 @@
 /* See LICENSE file for copyright and license details. */
-/* graph — filesystem repository over SMB */
+/* graph — personal knowledge hub */
 
 #ifndef GRAPH_H
 #define GRAPH_H
