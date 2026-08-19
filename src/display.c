@@ -1303,8 +1303,10 @@ hand_to_shell(const char *shell, const char *dir)
 #else
 	/* Detached, so the terminal is free and its closing does not take the
 	 * window along. GtkApplication makes a second launch forward to the
-	 * first and exit; a load failure exits 127 at once, which the brief
-	 * look afterwards catches so the browser can take over. */
+	 * first and exit 0, so a quick exit is only a failure when the status
+	 * says so: 127 for a shell that could not be run at all, 1 for one that
+	 * ran and found DISPLAY pointing at nothing. The brief look afterwards
+	 * catches both, and the browser takes over. */
 	struct timespec ts = { 0, 200 * 1000 * 1000 };
 	pid_t pid;
 	int st;
@@ -1325,7 +1327,7 @@ hand_to_shell(const char *shell, const char *dir)
 	}
 	nanosleep(&ts, NULL);
 	if (waitpid(pid, &st, WNOHANG) == pid && WIFEXITED(st) &&
-	    WEXITSTATUS(st) == 127)
+	    WEXITSTATUS(st) != 0)
 		return 0;
 	return 1;
 #endif
