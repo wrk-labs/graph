@@ -216,6 +216,17 @@ static App *app;
 	    [u.port isEqual:self.home.port];
 }
 
+/* What a link out may be: a web page or a mail address. file:, custom
+ * schemes and the rest would hand a note the power to start programs. */
+static BOOL
+isLinkOut(NSURL *u)
+{
+	NSString *s = u.scheme.lowercaseString;
+
+	return [s isEqualToString:@"http"] || [s isEqualToString:@"https"] ||
+	    [s isEqualToString:@"mailto"];
+}
+
 - (void)webView:(WKWebView *)w
     decidePolicyForNavigationAction:(WKNavigationAction *)a
     decisionHandler:(void (^)(WKNavigationActionPolicy))decide
@@ -226,7 +237,8 @@ static App *app;
 		decide(WKNavigationActionPolicyAllow);
 		return;
 	}
-	[[NSWorkspace sharedWorkspace] openURL:u];
+	if (isLinkOut(u))
+		[[NSWorkspace sharedWorkspace] openURL:u];
 	decide(WKNavigationActionPolicyCancel);
 }
 
@@ -240,7 +252,7 @@ static App *app;
 
 	if (u && [self isHome:u])
 		[self.web loadRequest:a.request];
-	else if (u)
+	else if (u && isLinkOut(u))
 		[[NSWorkspace sharedWorkspace] openURL:u];
 	return nil;
 }

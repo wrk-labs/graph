@@ -383,8 +383,20 @@ var N = [];                 /* enriched nodes */
 var cur = -1, open = {};    /* open[path] = expanded */
 
 function $(s) { return document.querySelector(s); }
+/* Quotes too: rendered text lands inside attributes (alt, title, data-p)
+ * as well as between tags, and a note is not always the reader's own. */
 function esc(s) {
-  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&#34;").replace(/'/g, "&#39;");
+}
+/* Only schemes that name a place to go. javascript:, data:, file: and the
+ * like are text, not links — a note must not run code or open programs. */
+function safeHref(u) { return /^(https?|mailto):/i.test(u); }
+/* inline() escapes first and matches after, so a path picked out of the
+ * escaped text is undone before it names a file */
+function unesc(s) {
+  return String(s).replace(/&#39;/g, "'").replace(/&#34;/g, '"').replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">").replace(/&amp;/g, "&");
 }
 function fmtSize(n) {
   if (!n) return "—";
@@ -993,20 +1005,24 @@ function md(src) {
     s = esc(s);
     /* wikilinks first, so emphasis and code rules cannot chew through a path */
     s = s.replace(/\[\[([^\]|]+)(\|([^\]]*))?\]\]/g, function (_, p, __, alias) {
-      var t = p.trim(), j = resolveLink(t), label = (alias || t).trim();
+      var t = unesc(p.trim()), j = resolveLink(t), label = (alias || t).trim();
       return j >= 0
         ? "<span class='wl' data-p='" + esc(N[j].path) + "'>" + esc(label) + "</span>"
         : "<span class='wl broken' title='unresolved: " + esc(t) + "'>" + esc(label) + "</span>";
     });
     s = s.replace(/`([^`]+)`/g, "<code>$1</code>");
     s = s.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, function (_, alt, src) {
-      var url = /^[a-z]+:/i.test(src) ? src : "/api/raw?path=" + encodeURIComponent(src);
+      var url;
+      if (/^https?:/i.test(src)) url = src;
+      else if (/^[a-z][a-z0-9+.-]*:/i.test(src)) return _;   /* no other schemes */
+      else url = "/api/raw?path=" + encodeURIComponent(unesc(src)).replace(/'/g, "%27");
       return "<img class='md-img' src='" + url + "' alt='" + alt + "'>";
     });
     s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, function (_, txt, href) {
-      return /^[a-z]+:/i.test(href)
-        ? "<a class='ext' href='" + href + "' target='_blank' rel='noreferrer noopener'>" + txt + "</a>"
-        : "<span class='wl' data-p='" + href + "'>" + txt + "</span>";
+      if (safeHref(href))
+        return "<a class='ext' href='" + href + "' target='_blank' rel='noreferrer noopener'>" + txt + "</a>";
+      if (/^[a-z][a-z0-9+.-]*:/i.test(href)) return _;
+      return "<span class='wl' data-p='" + href + "'>" + txt + "</span>";
     });
     s = s.replace(/~~([^~]+)~~/g, "<del>$1</del>");
     s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");

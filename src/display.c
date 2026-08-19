@@ -19,6 +19,7 @@
 #include <strings.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -53,6 +54,8 @@ static struct node nodes[MAX_NODES];
 static struct edge edges[MAX_EDGES];
 static int nnodes, nedges;
 static char repo_root[PATH_MAX];
+static char token[33];		/* per-run secret; requests must carry it */
+static int srv_port;
 
 static const char *
 type_name(int t)
@@ -111,6 +114,7 @@ scan(const char *abs, const char *rel)
 	struct dirent *e;
 	struct stat st;
 	char child_abs[PATH_MAX], child_rel[512];
+	int n;
 
 	if (!(d = opendir(abs)))
 		return;
@@ -119,12 +123,29 @@ scan(const char *abs, const char *rel)
 			continue;
 		if (join_path(child_abs, sizeof(child_abs), abs, e->d_name) < 0)
 			continue;
+		/* a name that does not fit would be truncated into a name for
+		 * something else, so it is left out entirely */
 		if (*rel)
-			snprintf(child_rel, sizeof(child_rel), "%s/%s", rel, e->d_name);
+			n = snprintf(child_rel, sizeof(child_rel), "%s/%s", rel, e->d_name);
 		else
-			snprintf(child_rel, sizeof(child_rel), "%s", e->d_name);
-		if (stat(child_abs, &st) < 0)
+			n = snprintf(child_rel, sizeof(child_rel), "%s", e->d_name);
+		if (n < 0 || (size_t)n >= sizeof(child_rel))
 			continue;
+		if (lstat(child_abs, &st) < 0)
+			continue;
+		if (S_ISLNK(st.st_mode)) {
+			/* a link that leaves the tree would make whatever it
+			 * points at readable and writable through the page */
+			char real[PATH_MAX];
+			size_t rl = strlen(repo_root);
+
+			if (!realpath(child_abs, real) ||
+			    strncmp(real, repo_root, rl) ||
+			    (real[rl] && real[rl] != '/'))
+				continue;
+			if (stat(child_abs, &st) < 0)
+				continue;
+		}
 		if (S_ISDIR(st.st_mode)) {
 			add_node(child_rel, e->d_name, T_DIR);
 			scan(child_abs, child_rel);
@@ -299,17 +320,39 @@ json_str(FILE *f, const char *s)
 	fputc('"', f);
 }
 
+/* extra: further header lines, each ending in \r\n, or "". */
 static void
-send_head(FILE *f, const char *status, const char *type, size_t len)
+send_head_x(FILE *f, const char *status, const char *type, size_t len,
+    const char *extra)
 {
 	fprintf(f,
 	    "HTTP/1.1 %s\r\n"
 	    "Content-Type: %s\r\n"
 	    "Content-Length: %zu\r\n"
 	    "Cache-Control: no-store\r\n"
+	    "X-Content-Type-Options: nosniff\r\n"
+	    "%s"
 	    "Connection: close\r\n\r\n",
-	    status, type, len);
+	    status, type, len, extra);
 }
+
+static void
+send_head(FILE *f, const char *status, const char *type, size_t len)
+{
+	send_head_x(f, status, type, len, "");
+}
+
+/* The page itself. Scripts and styles are inline, so those stay open; the
+ * rest is pinned to this origin, nothing may frame it, and no referrer
+ * leaks a repository path to a site a note links to. */
+#define PAGE_HEADERS \
+	"Content-Security-Policy: default-src 'self'; " \
+	    "script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; " \
+	    "img-src 'self' data: http: https:; frame-src 'self'; " \
+	    "connect-src 'self'; object-src 'none'; base-uri 'none'; " \
+	    "form-action 'none'; frame-ancestors 'none'\r\n" \
+	"Referrer-Policy: no-referrer\r\n" \
+	"X-Frame-Options: DENY\r\n"
 
 static void
 send_text(FILE *f, const char *status, const char *type, const char *body, size_t len)
@@ -417,6 +460,17 @@ send_search(FILE *f, const char *q)
 	free(json);
 }
 
+static int
+hexval(int c)
+{
+	if (c >= '0' && c <= '9') return c - '0';
+	if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+	if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+	return -1;
+}
+
+/* In place; the result is never longer than the input. Only two real hex
+ * digits make an escape — sscanf's %x would also take a sign or a space. */
 static void
 url_decode(char *s)
 {
@@ -424,8 +478,7 @@ url_decode(char *s)
 	int hi, lo;
 
 	for (; *s; s++) {
-		if (*s == '%' && s[1] && s[2] &&
-		    sscanf(s + 1, "%1x%1x", &hi, &lo) == 2) {
+		if (*s == '%' && (hi = hexval(s[1])) >= 0 && (lo = hexval(s[2])) >= 0) {
 			*o++ = (char)(hi << 4 | lo);
 			s += 2;
 		} else if (*s == '+') {
@@ -566,14 +619,12 @@ send_raw(FILE *f, const char *rel)
 		send_text(f, "404 Not Found", "text/plain", "not found", 9);
 		return;
 	}
-	fprintf(f,
-	    "HTTP/1.1 200 OK\r\n"
-	    "Content-Type: %s\r\n"
-	    "Content-Length: %zu\r\n"
-	    "X-Content-Type-Options: nosniff\r\n"
-	    "Cache-Control: no-store\r\n"
-	    "Connection: close\r\n\r\n",
-	    mime_of(rel), len);
+	/* An SVG opened by itself is a document that may run script; the
+	 * sandbox drops it into an opaque origin, where it can see nothing
+	 * of this one. As an <img> it never ran script anyway. */
+	send_head_x(f, "200 OK", mime_of(rel), len,
+	    strstr(mime_of(rel), "svg") ?
+	    "Content-Security-Policy: sandbox\r\n" : "");
 	fwrite(body, 1, len, f);
 	free(body);
 }
@@ -591,9 +642,20 @@ create_path(FILE *f, const char *rel, int as_dir)
 	FILE *o;
 	int fd;
 
-	if (!*rel || strstr(rel, "..") || rel[0] == '/' || strchr(rel, '\\')) {
-		send_text(f, "400 Bad Request", "text/plain", "bad path", 8);
-		return;
+	{
+		const char *c;
+
+		for (c = rel; *c; c++)
+			if ((unsigned char)*c < 0x20 || *c == 0x7f)
+				break;
+		if (!*rel || *c || strstr(rel, "..") || rel[0] == '/' ||
+		    strchr(rel, '\\') || rel[0] == '.' || strstr(rel, "/.")) {
+			/* no control characters, and no dotfiles: the scan
+			 * skips those, so one made here could never be shown
+			 * or removed again */
+			send_text(f, "400 Bad Request", "text/plain", "bad path", 8);
+			return;
+		}
 	}
 	snprintf(parent, sizeof(parent), "%s", rel);
 	if ((slash = strrchr(parent, '/'))) {
@@ -680,21 +742,124 @@ remove_path(FILE *f, const char *rel)
 	send_text(f, "200 OK", "application/json", "{\"ok\":true}", 11);
 }
 
+/* ---- access ----
+ *
+ * The server listens on loopback only, but loopback is shared with every
+ * other user and program on the machine, and a web page can reach it too.
+ * Two checks stand in for the login there is no room for:
+ *
+ *   - the Host header must name this machine, so a page whose hostname was
+ *     pointed at 127.0.0.1 (DNS rebinding) is turned away — as far as the
+ *     browser knew, that page was talking to itself;
+ *   - every request must carry the token minted at startup, first in the
+ *     URL this program prints and opens, then in a cookie it sets from that
+ *     visit. Anyone who did not see the URL does not get in.
+ *
+ * Writes need the custom header on top, which the browser only sends from
+ * this origin. */
+
+static void
+gen_token(void)
+{
+	static const char hex[] = "0123456789abcdef";
+	unsigned char b[16];
+	FILE *r;
+	int i;
+
+	if (!(r = fopen("/dev/urandom", "rb")) || fread(b, 1, sizeof(b), r) != sizeof(b))
+		die("cannot read /dev/urandom");
+	fclose(r);
+	for (i = 0; i < 16; i++) {
+		token[2 * i] = hex[b[i] >> 4];
+		token[2 * i + 1] = hex[b[i] & 15];
+	}
+	token[32] = '\0';
+}
+
+/* Same length and content, in time that does not depend on where they
+ * differ, so the token cannot be guessed one character at a time. */
+static int
+token_ok(const char *s, size_t n)
+{
+	unsigned d = 0;
+	size_t i;
+
+	if (n != 32)
+		return 0;
+	for (i = 0; i < 32; i++)
+		d |= (unsigned char)s[i] ^ (unsigned char)token[i];
+	return d == 0;
+}
+
+/* "127.0.0.1", "localhost" or "[::1]", with this port or none at all. */
+static int
+host_ok(const char *h)
+{
+	const char *colon;
+	size_t n;
+
+	while (*h == ' ' || *h == '\t')
+		h++;
+	n = strcspn(h, " \t\r\n");
+	colon = h[0] == '[' ? strchr(h, ']') : NULL;
+	colon = colon ? (colon[1] == ':' ? colon + 1 : NULL) : memchr(h, ':', n);
+	if (colon) {
+		if (atoi(colon + 1) != srv_port)
+			return 0;
+		n = (size_t)(colon - h);
+	}
+	return (n == 9 && !strncmp(h, "127.0.0.1", 9)) ||
+	    (n == 9 && !strncasecmp(h, "localhost", 9)) ||
+	    (n == 5 && !strncmp(h, "[::1]", 5));
+}
+
+/* Look for graph_<port>=<token> among the cookies. The name carries the
+ * port because cookies ignore ports: several repositories open at once
+ * are several servers on one host, each with a token of its own. */
+static int
+cookie_ok(const char *c)
+{
+	char name[32];
+	size_t nl;
+	const char *p;
+
+	nl = (size_t)snprintf(name, sizeof(name), "graph_%d=", srv_port);
+	for (p = c; (p = strstr(p, name)); p += nl) {
+		if (p != c && p[-1] != ' ' && p[-1] != ';')
+			continue;
+		if (token_ok(p + nl, strcspn(p + nl, "; \r\n")))
+			return 1;
+	}
+	return 0;
+}
+
 static void
 handle(int fd)
 {
 	FILE *f;
 	char line[2048], *path, *end, *query, *body = NULL;
 	long clen = 0, want_mtime = 0;
-	int is_put = 0, guarded = 0, method = 0;
+	int is_put = 0, guarded = 0, method = 0, host = 0, cookie = 0;
 	enum { M_GET = 1, M_PUT, M_POST, M_DELETE };
 	size_t got = 0;
+	struct timeval tv = { 15, 0 };
+
+	/* one connection at a time is served, so one that stalls — a client
+	 * that never finishes its request, or never reads the answer — must
+	 * not be allowed to hold everyone else */
+	setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+	setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
 	if (!(f = fdopen(fd, "r+"))) {
 		close(fd);
 		return;
 	}
 	if (!fgets(line, sizeof(line), f)) {
+		fclose(f);
+		return;
+	}
+	if (!strchr(line, '\n')) {
+		send_text(f, "414 URI Too Long", "text/plain", "too long", 8);
 		fclose(f);
 		return;
 	}
@@ -724,7 +889,7 @@ handle(int fd)
 	if ((query = strchr(path, '?')))
 		*query++ = '\0';
 
-	if (method != M_GET) {
+	{
 		char hdr[2048];
 
 		while (fgets(hdr, sizeof(hdr), f)) {
@@ -732,12 +897,50 @@ handle(int fd)
 				break;
 			if (!strncasecmp(hdr, "Content-Length:", 15))
 				clen = atol(hdr + 15);
+			else if (!strncasecmp(hdr, "Host:", 5))
+				host = host_ok(hdr + 5);
+			else if (!strncasecmp(hdr, "Cookie:", 7))
+				cookie = cookie_ok(hdr + 7);
 			/* A custom header cannot be sent cross-origin without a
 			 * preflight this server never answers, so requiring one
 			 * keeps another page on the machine from writing here. */
 			else if (!strncasecmp(hdr, "X-Graph-Write:", 14))
 				guarded = 1;
 		}
+	}
+	if (!host) {
+		send_text(f, "421 Misdirected Request", "text/plain", "wrong host", 10);
+		fclose(f);
+		return;
+	}
+
+	/* the front door: the printed URL sets the cookie and moves on */
+	if (method == M_GET && !strcmp(path, "/") && query &&
+	    !strncmp(query, "token=", 6)) {
+		if (token_ok(query + 6, strcspn(query + 6, "&"))) {
+			char extra[160];
+
+			snprintf(extra, sizeof(extra),
+			    "Location: /\r\n"
+			    "Set-Cookie: graph_%d=%s; Path=/; HttpOnly; SameSite=Strict\r\n",
+			    srv_port, token);
+			send_head_x(f, "303 See Other", "text/plain", 0, extra);
+		} else {
+			send_text(f, "403 Forbidden", "text/plain", "bad token", 9);
+		}
+		fclose(f);
+		return;
+	}
+	if (!cookie) {
+		static const char msg[] =
+		    "graph: not signed in — open the address that graph display printed\n";
+		send_text(f, "401 Unauthorized", "text/plain; charset=utf-8", msg,
+		    sizeof(msg) - 1);
+		fclose(f);
+		return;
+	}
+
+	if (method != M_GET) {
 		if (!guarded) {
 			send_text(f, "403 Forbidden", "text/plain", "missing write header", 20);
 			fclose(f);
@@ -755,6 +958,13 @@ handle(int fd)
 			}
 			got = fread(body, 1, (size_t)clen, f);
 			body[got] = '\0';
+			if (got != (size_t)clen) {
+				/* a body cut short must not become the note */
+				send_text(f, "400 Bad Request", "text/plain", "short body", 10);
+				free(body);
+				fclose(f);
+				return;
+			}
 		}
 	}
 
@@ -810,8 +1020,9 @@ handle(int fd)
 	}
 
 	if (!strcmp(path, "/")) {
-		send_text(f, "200 OK", "text/html; charset=utf-8",
-		    ui_html, strlen(ui_html));
+		send_head_x(f, "200 OK", "text/html; charset=utf-8",
+		    strlen(ui_html), PAGE_HEADERS);
+		fwrite(ui_html, 1, strlen(ui_html), f);
 	} else if (!strcmp(path, "/api/graph")) {
 		send_graph(f);
 	} else if (!strcmp(path, "/api/search")) {
@@ -1128,7 +1339,7 @@ int
 cmd_display(int argc, char *argv[])
 {
 	const char *path = NULL, *shell;
-	char url[64], shellbuf[PATH_MAX];
+	char url[96], shellbuf[PATH_MAX];
 	int port = 7373, i, srv, fd, notes, launch = 1, tries = 20, bad = 0;
 	int follow = 0;
 	pid_t parent = getppid();
@@ -1187,7 +1398,9 @@ cmd_display(int argc, char *argv[])
 		if (nodes[i].type == T_NOTE)
 			notes++;
 	srv = listen_local(&port, tries);
-	snprintf(url, sizeof(url), "http://127.0.0.1:%d", port);
+	srv_port = port;
+	gen_token();
+	snprintf(url, sizeof(url), "http://127.0.0.1:%d/?token=%s", port, token);
 	printf("%s\n", repo_root);
 	printf("%d notes, %d links — %s\n", notes, nedges, url);
 	fflush(stdout);

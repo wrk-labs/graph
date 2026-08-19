@@ -25,6 +25,7 @@
 
 struct tab {
 	char *dir;
+	char *url;		/* as printed by the server, token and all */
 	char *host;
 	guint port;
 	GPid pid;
@@ -224,6 +225,7 @@ start_server(struct tab *t, char **err)
 			end = http + strcspn(http, " \t\r\n");
 			line = g_strndup(http, end - http);
 			if ((u = g_uri_parse(line, G_URI_FLAGS_NONE, NULL))) {
+				t->url = g_strdup(line);
 				t->host = g_strdup(g_uri_get_host(u));
 				t->port = (guint)g_uri_get_port(u);
 				g_uri_unref(u);
@@ -270,6 +272,7 @@ close_tab(struct tab *t)
 	if (i >= 0)
 		gtk_notebook_remove_page(GTK_NOTEBOOK(book), i);
 	g_free(t->dir);
+	g_free(t->url);
 	g_free(t->host);
 	g_free(t);
 	save_session();
@@ -298,6 +301,15 @@ is_home(struct tab *t, const char *uri)
 	return same;
 }
 
+/* What a link out may be: a web page or a mail address. file:, custom
+ * schemes and the rest would hand a note the power to start programs. */
+static gboolean
+is_link_out(const char *uri)
+{
+	return g_str_has_prefix(uri, "http://") || g_str_has_prefix(uri, "https://") ||
+	    g_str_has_prefix(uri, "mailto:");
+}
+
 /* Only the server's own origin is shown here; anything else is a link out. */
 static gboolean
 on_decide(WebKitWebView *web, WebKitPolicyDecision *d,
@@ -321,7 +333,8 @@ on_decide(WebKitWebView *web, WebKitPolicyDecision *d,
 		}
 		return FALSE;
 	}
-	g_app_info_launch_default_for_uri(uri, NULL, NULL);
+	if (is_link_out(uri))
+		g_app_info_launch_default_for_uri(uri, NULL, NULL);
 	webkit_policy_decision_ignore(d);
 	return TRUE;
 }
@@ -342,7 +355,6 @@ add_tab(struct tab *t)
 	GtkWidget *name = gtk_label_new(strrchr(t->dir, '/') + 1);
 	GtkWidget *x = gtk_button_new_from_icon_name("window-close-symbolic",
 	    GTK_ICON_SIZE_MENU);
-	char *url = g_strdup_printf("http://%s:%u", t->host, t->port);
 	int i;
 
 	gtk_button_set_relief(GTK_BUTTON(x), GTK_RELIEF_NONE);
@@ -355,8 +367,7 @@ add_tab(struct tab *t)
 	t->page = webkit_web_view_new();
 	g_object_set_data(G_OBJECT(t->page), "tab", t);
 	g_signal_connect(t->page, "decide-policy", G_CALLBACK(on_decide), t);
-	webkit_web_view_load_uri(WEBKIT_WEB_VIEW(t->page), url);
-	g_free(url);
+	webkit_web_view_load_uri(WEBKIT_WEB_VIEW(t->page), t->url);
 	gtk_widget_show(t->page);
 
 	i = gtk_notebook_append_page(GTK_NOTEBOOK(book), t->page, label);

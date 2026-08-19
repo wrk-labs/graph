@@ -52,7 +52,9 @@ Without a path it opens the repository you are in, or the ones you had open
 last. On macOS the window is Graph, installed with `graph` and there in
 Spotlight and the Dock like any other application. With `--no-open`, or where
 no window is available, `graph display` serves the same view to your browser
-at `127.0.0.1:7373`.
+at `127.0.0.1:7373`, and prints the address to open — it carries a key made
+for that run, so nothing else on the machine can read or change your notes
+through it.
 
 ## Layout
 
