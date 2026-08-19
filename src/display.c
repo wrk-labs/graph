@@ -166,7 +166,11 @@ scan(const char *abs, const char *rel)
 static int
 resolve(const char *target, const char *from_dir)
 {
-	char buf[512];
+	/* Wide enough for the longest join a caller can hand over — a full
+	 * node path, a separator and a full link target — so the candidate is
+	 * always formed whole. Anything that long matches no node anyway; the
+	 * point is that it fails by lookup rather than by truncation. */
+	char buf[sizeof(nodes[0].path) + sizeof(edges[0].raw) + 1];
 	int i;
 
 	if (!strncmp(target, "./", 2)) {
@@ -180,8 +184,9 @@ resolve(const char *target, const char *from_dir)
 	if ((i = find_node(buf)) >= 0)
 		return i;
 
-	if (strlen(buf) + 3 < sizeof(buf)) {
-		char md[512];
+	{
+		char md[sizeof(buf) + 3];
+
 		snprintf(md, sizeof(md), "%s.md", buf);
 		if ((i = find_node(md)) >= 0)
 			return i;
@@ -1106,9 +1111,13 @@ handle(int fd)
 	}
 
 	if (!strcmp(path, "/")) {
+		/* Embedded as unsigned bytes; it is text all the same. */
+		const char *html = (const char *)ui_html;
+		size_t n = strlen(html);
+
 		send_head_x(f, "200 OK", "text/html; charset=utf-8",
-		    strlen(ui_html), PAGE_HEADERS);
-		fwrite(ui_html, 1, strlen(ui_html), f);
+		    n, PAGE_HEADERS);
+		fwrite(html, 1, n, f);
 	} else if (!strcmp(path, "/api/graph")) {
 		send_graph(f);
 	} else if (!strcmp(path, "/api/search")) {
@@ -1324,6 +1333,10 @@ hand_to_shell(const char *shell, const char *dir)
 #endif
 }
 
+/* Every URL handed around below is a loopback address carrying the run
+ * token, so one size covers them all. */
+#define URL_MAX 96
+
 /* Hand the URL to a browser from a detached child. Chromium-family browsers
  * open a URL chromeless with --app, which lives exactly as long as this
  * server does and leaves nothing installed behind. Without one of those the
@@ -1335,7 +1348,7 @@ static void
 open_browser(const char *url)
 {
 	const char *cmd;
-	char app[80];
+	char app[sizeof "--app=" + URL_MAX];
 	pid_t pid;
 	size_t i;
 #ifdef __APPLE__
@@ -1425,7 +1438,7 @@ int
 cmd_display(int argc, char *argv[])
 {
 	const char *path = NULL, *shell;
-	char url[96], shellbuf[PATH_MAX];
+	char url[URL_MAX], shellbuf[PATH_MAX];
 	int port = 7373, i, srv, fd, notes, launch = 1, tries = 20, bad = 0;
 	int follow = 0;
 	pid_t parent = getppid();
