@@ -27,7 +27,14 @@ main(int argc, char *argv[])
 {
 	const char *cmd;
 
+	/* Bare `graph` opens the app, the way the desktop entry does. Only with
+	 * no arguments at all: a path in that position would have to be told
+	 * apart from a command name, and a repository directory called `init`
+	 * is not something to gamble on. Without a desktop to open onto — over
+	 * ssh, in a script — the help is the more useful answer. */
 	if (argc < 2) {
+		if (have_display())
+			return cmd_display(0, argv + 1);
 		usage(stderr);
 		return 1;
 	}

@@ -747,8 +747,6 @@ remove_path(FILE *f, const char *rel)
 	send_text(f, "200 OK", "application/json", "{\"ok\":true}", 11);
 }
 
-static int have_display(void);
-
 /* Hand a file to whatever the desktop opens it with, or a directory to the
  * file manager. Same rules as a write: only a path the scan knows, and
  * never something the opener would run rather than show — an executable
@@ -1218,7 +1216,7 @@ run(char *const argv[])
  * open repository — its tabs — with --no-open, reading the URL this prints. */
 
 /* True when there is a desktop to draw on at all. */
-static int
+int
 have_display(void)
 {
 #ifdef __APPLE__
