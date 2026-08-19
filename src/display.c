@@ -742,6 +742,86 @@ remove_path(FILE *f, const char *rel)
 	send_text(f, "200 OK", "application/json", "{\"ok\":true}", 11);
 }
 
+static int have_display(void);
+
+/* Hand a file to whatever the desktop opens it with, or a directory to the
+ * file manager. Same rules as a write: only a path the scan knows, and
+ * never something the opener would run rather than show — an executable
+ * bit or a launcher extension is an answer of no. The opener runs
+ * detached with its output discarded, so it can neither block nor talk
+ * back into this connection. */
+static int
+launcher_ext(const char *name)
+{
+	static const char *const bad[] = {
+		".command", ".sh", ".bash", ".zsh", ".app", ".jar", ".desktop",
+		".exe", ".bat", ".cmd", ".com", ".scpt", ".workflow", ".pkg",
+		".dmg", ".msi", ".ps1", ".vbs", ".py", ".rb", ".pl", NULL
+	};
+	const char *d = strrchr(name, '.');
+	int i;
+
+	if (!d)
+		return 0;
+	for (i = 0; bad[i]; i++)
+		if (!strcasecmp(d, bad[i]))
+			return 1;
+	return 0;
+}
+
+static void
+open_path(FILE *f, const char *rel)
+{
+	char abs[PATH_MAX];
+	struct stat st;
+	pid_t pid;
+	int i;
+
+	i = find_node(rel);
+	if (i < 0 || nodes[i].type == T_MISSING) {
+		send_text(f, "404 Not Found", "text/plain", "not found", 9);
+		return;
+	}
+	if (join_path(abs, sizeof(abs), repo_root, rel) < 0 || stat(abs, &st) < 0) {
+		send_text(f, "404 Not Found", "text/plain", "not found", 9);
+		return;
+	}
+	if (nodes[i].type != T_DIR &&
+	    ((st.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) || launcher_ext(rel))) {
+		send_text(f, "403 Forbidden", "text/plain",
+		    "will not open an executable", 27);
+		return;
+	}
+	if (!have_display()) {
+		send_text(f, "501 Not Implemented", "text/plain", "no desktop here", 15);
+		return;
+	}
+	if ((pid = fork()) < 0) {
+		send_text(f, "500 Internal Server Error", "text/plain", "cannot open", 11);
+		return;
+	}
+	if (pid == 0) {
+		int nul = open("/dev/null", O_RDWR);
+
+		if (fork() > 0)
+			_exit(0);
+		setsid();
+		if (nul >= 0) {
+			dup2(nul, 0); dup2(nul, 1); dup2(nul, 2);
+			if (nul > 2)
+				close(nul);
+		}
+#ifdef __APPLE__
+		execlp("open", "open", abs, (char *)NULL);
+#else
+		execlp("xdg-open", "xdg-open", abs, (char *)NULL);
+#endif
+		_exit(127);
+	}
+	waitpid(pid, NULL, 0);
+	send_text(f, "200 OK", "application/json", "{\"ok\":true}", 11);
+}
+
 /* ---- access ----
  *
  * The server listens on loopback only, but loopback is shared with every
@@ -973,6 +1053,12 @@ handle(int fd)
 	build();
 
 	if (method == M_POST) {
+		if (!strcmp(path, "/api/open") && query && !strncmp(query, "path=", 5)) {
+			url_decode(query + 5);
+			open_path(f, query + 5);
+			fclose(f);
+			return;
+		}
 		if (!strcmp(path, "/api/new") && query && !strncmp(query, "path=", 5)) {
 			char *amp = strchr(query, '&');
 			int as_dir = 0;

@@ -536,7 +536,7 @@ function kindOf(x) {
 }
 
 function fileHead(x) {
-  var bits = [], e = extOf(x.path), act = "";
+  var bits = [], act = "";
 
   bits.push("<span class='kind'>" + kindOf(x) + "</span>");
   if (x.type === "dir") bits.push("<b>" + countIn(x.path) + "</b> files");
@@ -544,14 +544,12 @@ function fileHead(x) {
   if (x.mtime) bits.push(fmtDate(x.mtime));
   bits.push("<b>" + x.ins.length + "</b> referring");
 
+  /* the same thing o does: the desktop's own application for it, so a
+   * spreadsheet gets a spreadsheet and the page stays where it is */
   if (x.type === "note")
     act = "<span class='btn' id='goedit'>edit</span>";
-  else if (x.type === "file") {
-    var label = ["png", "jpg", "jpeg", "gif", "webp", "svg"].indexOf(e) >= 0 ? "Full size"
-      : e === "pdf" ? "Open in new tab" : "Open";
-    act = "<a class='btn' href='" + rawURL(x.path) +
-          "' target='_blank' rel='noreferrer noopener'>" + label + "</a>";
-  }
+  else if (x.type === "file")
+    act = "<span class='btn' id='goopen'>open</span>";
   return "<div class='filehead'><span class='meta'>" +
     bits.join("<i>·</i>") + "</span>" + act + "</div>";
 }
@@ -580,6 +578,7 @@ function show(i, fromTree) {
   });
   $("#main").scrollTop = 0;
   if ($("#goedit")) $("#goedit").onclick = function () { edit(x); };
+  if ($("#goopen")) $("#goopen").onclick = function () { openWith(x); };
 
   if (x.type === "dir") folder(x);
   else if (x.type === "note") note(x);
@@ -1174,6 +1173,7 @@ function hints() {
     var x = cur >= 0 ? N[cur] : null;
     list = [["k/j", "down/up"], ["h/l", "fold"], ["\u23ce", "open"]];
     if (x && x.type === "note") list.push(["e", "edit"]);
+    if (x) list.push(["o", "open"]);
     list.push(["/", "search"], [":new", "file"], [":mkdir", "dir"],
               [":rm", "delete"], ["gg/G", "ends"]);
   }
@@ -1378,7 +1378,19 @@ function browseKey(ev) {
     return;
   }
   if (k === "e" && cur >= 0 && N[cur].type === "note") { ev.preventDefault(); return edit(N[cur]); }
+  if (k === "o" && cur >= 0) { ev.preventDefault(); return openWith(N[cur]); }
   if (k === "/") { ev.preventDefault(); return $("#find").focus(); }
+}
+
+/* o: the file in whatever the desktop uses for it, a directory in the file
+ * manager. The server does the opening, so this works the same from the
+ * window and from a browser. */
+function openWith(x) {
+  if (!x || x.type === "missing") return flash("nothing to open", 1);
+  api("POST", "/api/open?path=" + encodeURIComponent(x.path)).then(function (r) {
+    if (r.ok) flash("opened " + (x.name || "/"));
+    else flash(r.body || "cannot open", 1);
+  });
 }
 
 /* Line numbers.
@@ -1462,7 +1474,8 @@ function lineIndex() {
  * exactly what was typed: nothing round-trips through a DOM and back, so
  * bullets, wrapping and table alignment survive a save untouched.
  */
-var ED = {on: false, node: -1, mtime: 0, original: "", acItems: [], acSel: 0};
+var ED = {on: false, node: -1, mtime: 0, original: "", acItems: [], acSel: 0,
+          stale: false};   /* stale: the note moved on disk since it was loaded */
 
 function edit(x) {
   fetch("/api/file?path=" + encodeURIComponent(x.path))
@@ -1485,7 +1498,7 @@ function setState(msg, cls) {
 }
 
 function openEditor(x, text) {
-  ED.on = true; ED.node = x.i; ED.mtime = x.mtime; ED.original = text;
+  ED.on = true; ED.node = x.i; ED.mtime = x.mtime; ED.original = text; ED.stale = false;
   /* Opening a search result navigates away, which would drop unsaved work.
    * Simpler to take the option away than to ask about it later. */
   var find = $("#find");
@@ -1741,28 +1754,35 @@ function edKeys(ev) {
   vimKey(ev);
 }
 
-function save() {
+/* Resolves to true when the note is on disk. The mtime the note was loaded
+ * with goes along, and the server refuses to write over a file that has
+ * moved on since — unless force (:w!), which sends none and means "mine
+ * wins". */
+function save(force) {
   var ta = $("#edtext"), x = N[ED.node];
   setState("saving…", "");
-  fetch("/api/file?path=" + encodeURIComponent(x.path) + "&mtime=" + ED.mtime, {
+  return fetch("/api/file?path=" + encodeURIComponent(x.path) +
+      "&mtime=" + (force ? 0 : ED.mtime), {
     method: "PUT",
     headers: {"X-Graph-Write": "1", "Content-Type": "text/plain; charset=utf-8"},
     body: ta.value
   }).then(function (r) {
     if (r.status === 409) {
-      setState("changed on disk — reload before saving", "err");
+      setState("changed on disk — :w! to overwrite, :q! to discard", "err");
       return null;
     }
     if (!r.ok) { setState("save failed", "err"); return null; }
     return r.json();
   }).then(function (j) {
-    if (!j) return;
+    if (!j) return false;
     ED.original = ta.value;
     ED.mtime = j.mtime;
+    ED.stale = false;
     setState("saved", "");
     /* the link graph may have changed, so take a fresh scan */
     reload(x.path);
-  }).catch(function () { setState("save failed", "err"); });
+    return true;
+  }).catch(function () { setState("save failed", "err"); return false; });
 }
 
 function cancel() {
@@ -1782,6 +1802,59 @@ function reload(keepPath) {
     else show(j >= 0 ? j : 0);
   });
 }
+
+/* The files are the source of truth, and they change behind the page's
+ * back — an export dropped in, a note edited elsewhere. Coming back to the
+ * window asks the server again: the tree always, the open item only if
+ * its size or time moved, so nothing flickers when nothing happened. An
+ * edit in progress is left alone; save already refuses a note changed on
+ * disk. */
+var refreshTimer = null;
+function refresh() {
+  if (ED.on) return refreshEditing();
+  if ($("#doc").classList.contains("editing")) return;
+  var keep = cur >= 0 ? N[cur].path : null;
+  var was = cur >= 0 ? N[cur].mtime + ":" + N[cur].size : "";
+  fetch("/api/graph").then(function (r) { return r.json(); }).then(function (d) {
+    if (ED.on) return;
+    G = d;
+    build();
+    navTree();
+    var j = keep === null ? -1 : idx(keep);
+    if (j < 0) return show(0);
+    cur = j;
+    if (N[j].mtime + ":" + N[j].size !== was || N[j].type === "dir") show(j, true);
+    else reveal(N[j].path);
+  }).catch(function () {});
+}
+/* Mid-edit the buffer is sacred, but the tree can still follow the disk,
+ * and if the very note being edited has changed there it is better said
+ * now than at :w. */
+function refreshEditing() {
+  var x = N[ED.node], path = x ? x.path : null;
+  if (path === null) return;
+  fetch("/api/graph").then(function (r) { return r.json(); }).then(function (d) {
+    if (!ED.on) return;
+    G = d;
+    build();
+    navTree();
+    var j = idx(path);
+    if (j < 0) { setState("removed on disk — :w! to write it back", "err"); return; }
+    ED.node = j;
+    if (N[j].mtime !== ED.mtime && !ED.stale) {
+      ED.stale = true;
+      setState("changed on disk — :w! to overwrite, :q! to discard", "err");
+    }
+  }).catch(function () {});
+}
+function refreshSoon() {
+  clearTimeout(refreshTimer);
+  refreshTimer = setTimeout(refresh, 150);
+}
+window.addEventListener("focus", refreshSoon);
+document.addEventListener("visibilitychange", function () {
+  if (document.visibilityState === "visible") refreshSoon();
+});
 
 /* ---------- modal editing ----------
  * A working subset, not an emulator: motions, operators, registers, counts,
@@ -1976,8 +2049,15 @@ function runCmd(c) {
     return searchNext(1);
   }
   var body = c.slice(1).trim();
-  if (body === "w") return save();
-  if (body === "wq" || body === "x") { save(); return cancelSoon(); }
+  if (body === "w" || body === "w!") return save(body === "w!");
+  if (body === "wq" || body === "x" || body === "wq!" || body === "x!") {
+    /* leave only once the note is really on disk; a refused save keeps
+     * the buffer, and the message says what to do with it */
+    save(body.slice(-1) === "!").then(function (ok) {
+      if (ok) { ED.original = vv(); cancel(); }
+    });
+    return;
+  }
   if (body === "q") {
     if (vv() !== ED.original) return setState("unsaved changes — :q! to discard", "err");
     return cancel();
@@ -1985,7 +2065,6 @@ function runCmd(c) {
   if (body === "q!") { ED.original = vv(); return cancel(); }
   setState("unknown command: " + body, "err");
 }
-function cancelSoon() { setTimeout(function () { ED.original = vv(); cancel(); }, 120); }
 
 function searchNext(dir) {
   if (!VIM.lastSearch) return;
