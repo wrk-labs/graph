@@ -14,8 +14,8 @@ usage(FILE *out)
 	    "\n"
 	    "commands:\n"
 	    "  init <path>              create a Graph repository\n"
-	    "  display <path> [--port <port>] [--no-open]\n"
-	    "                           serve a local view of a repository\n"
+	    "  display [path] [--port <port>] [--no-open]\n"
+	    "                           open a local view of a repository\n"
 	    "\n"
 	    "  -v, --version  print version\n"
 	    "  -h, --help     print this message\n",

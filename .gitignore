@@ -5,3 +5,5 @@ src/ui.h
 dist/
 tmp/
 .*.swp
+Graph.app/
+graph-shell

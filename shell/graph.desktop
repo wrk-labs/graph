@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=graph
+Comment=Open a Graph repository
+Icon=graph
+Exec=graph display
+Terminal=false
+Categories=Utility;
+StartupWMClass=graph

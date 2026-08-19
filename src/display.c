@@ -10,6 +10,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,7 +20,11 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
 
 #include "graph.h"
 #include "ui.h"
@@ -875,26 +880,183 @@ listen_local(int *port, int tries)
 	return fd;
 }
 
-/* Hand the URL to the desktop's opener from a detached child. Best effort:
- * no opener, no display or a failing one must not take the server down, so
+/* Run a command to completion and return its exit status, 127 if it could
+ * not be started. Used from the detached opener, so blocking is fine. */
+static int
+run(char *const argv[])
+{
+	pid_t pid;
+	int st;
+
+	if ((pid = fork()) < 0)
+		return 127;
+	if (pid == 0) {
+		execvp(argv[0], argv);
+		_exit(127);
+	}
+	if (waitpid(pid, &st, 0) < 0 || !WIFEXITED(st))
+		return 127;
+	return WEXITSTATUS(st);
+}
+
+/* ---- desktop ----
+ *
+ * The server is the application; what shows it is a detail. In order of
+ * preference: the native shell built alongside this binary (Graph.app on
+ * macOS, graph-shell on Linux), a Chromium-family browser opened chromeless
+ * with --app, the ordinary opener. $BROWSER set means "a browser, this one",
+ * skipping the shell as well.
+ *
+ * With a shell the roles invert: `graph display <path>` only hands the
+ * repository to the shell and returns, and the shell runs one server per
+ * open repository — its tabs — with --no-open, reading the URL this prints. */
+
+/* True when there is a desktop to draw on at all. */
+static int
+have_display(void)
+{
+#ifdef __APPLE__
+	return 1;
+#else
+	return getenv("DISPLAY") || getenv("WAYLAND_DISPLAY");
+#endif
+}
+
+/* Locate the native shell: beside this binary in a build tree or bundle, or
+ * under ../libexec/graph next to an installed bin/graph. NULL if absent. */
+static const char *
+find_shell(char *buf, size_t n)
+{
+	static const char *const rel[] = {
+#ifdef __APPLE__
+		"../libexec/graph/Graph.app/Contents/MacOS/graph-shell",
+		"Graph.app/Contents/MacOS/graph-shell",
+#else
+		"graph-shell", "../libexec/graph/graph-shell",
+#endif
+		NULL
+	};
+	char exe[PATH_MAX], dir[PATH_MAX], *slash;
+	size_t i, n2;
+#ifdef __APPLE__
+	uint32_t sz = sizeof(exe);
+
+	if (_NSGetExecutablePath(exe, &sz) != 0)
+		return NULL;
+#else
+	ssize_t len = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+
+	if (len < 0)
+		return NULL;
+	exe[len] = '\0';
+#endif
+	if (!realpath(exe, dir) || !(slash = strrchr(dir, '/')))
+		return NULL;
+	*slash = '\0';
+#ifdef __APPLE__
+	/* Inside the bundle, the shell is our sibling; the Linux name is
+	 * reused there so it can never collide with graph itself on a
+	 * case-insensitive disk. */
+	n2 = strlen(dir);
+	if (n2 > 15 && !strcmp(dir + n2 - 15, "/Contents/MacOS") &&
+	    join_path(buf, n, dir, "graph-shell") == 0 && access(buf, X_OK) == 0)
+		return buf;
+#else
+	(void)n2;
+#endif
+	for (i = 0; rel[i]; i++) {
+		if (join_path(buf, n, dir, rel[i]) < 0)
+			continue;
+		if (access(buf, X_OK) == 0)
+			return buf;
+	}
+	return NULL;
+}
+
+/* Give the shell a repository to show, or with dir NULL just bring it up
+ * (it restores its last session or asks). Returns 0 if the shell could not
+ * be started, in which case the caller falls back to serving here. */
+static int
+hand_to_shell(const char *shell, const char *dir)
+{
+#ifdef __APPLE__
+	/* The shell lives in a bundle: go through open(1) so a running
+	 * instance receives the folder as a new tab instead of a second
+	 * application starting. The bundle is three levels up. */
+	char bundle[PATH_MAX], *p;
+	int i;
+
+	snprintf(bundle, sizeof(bundle), "%s", shell);
+	for (i = 0; i < 3; i++) {
+		if (!(p = strrchr(bundle, '/')))
+			return 0;
+		*p = '\0';
+	}
+	{
+		char *const argv[] = { "open", "-a", bundle, (char *)dir, NULL };
+		return run(argv) == 0;
+	}
+#else
+	/* Detached, so the terminal is free and its closing does not take the
+	 * window along. GtkApplication makes a second launch forward to the
+	 * first and exit; a load failure exits 127 at once, which the brief
+	 * look afterwards catches so the browser can take over. */
+	struct timespec ts = { 0, 200 * 1000 * 1000 };
+	pid_t pid;
+	int st;
+
+	if ((pid = fork()) < 0)
+		return 0;
+	if (pid == 0) {
+		int nul = open("/dev/null", O_RDWR);
+
+		setsid();
+		if (nul >= 0) {
+			dup2(nul, 0); dup2(nul, 1); dup2(nul, 2);
+			if (nul > 2)
+				close(nul);
+		}
+		execl(shell, shell, dir, (char *)NULL);
+		_exit(127);
+	}
+	nanosleep(&ts, NULL);
+	if (waitpid(pid, &st, WNOHANG) == pid && WIFEXITED(st) &&
+	    WEXITSTATUS(st) == 127)
+		return 0;
+	return 1;
+#endif
+}
+
+/* Hand the URL to a browser from a detached child. Chromium-family browsers
+ * open a URL chromeless with --app, which lives exactly as long as this
+ * server does and leaves nothing installed behind. Without one of those the
+ * URL goes to the ordinary opener.
+ *
+ * Best effort: no browser or a failing one must not take the server down, so
  * every error is swallowed and the URL is printed regardless. */
 static void
 open_browser(const char *url)
 {
 	const char *cmd;
+	char app[80];
 	pid_t pid;
+	size_t i;
+#ifdef __APPLE__
+	static const char *const ids[] = {
+		"com.google.Chrome", "org.chromium.Chromium",
+		"com.brave.Browser", "com.microsoft.edgemac", NULL
+	};
+	const char *fallback = "open";
+#else
+	static const char *const ids[] = {
+		"google-chrome", "google-chrome-stable", "chromium",
+		"chromium-browser", "brave-browser", "microsoft-edge", NULL
+	};
+	const char *fallback = "xdg-open";
+#endif
 
 	if ((cmd = getenv("BROWSER")) && !*cmd)
 		cmd = NULL;
-	if (!cmd) {
-#ifdef __APPLE__
-		cmd = "open";
-#else
-		if (!getenv("DISPLAY") && !getenv("WAYLAND_DISPLAY"))
-			return;
-		cmd = "xdg-open";
-#endif
-	}
 	if ((pid = fork()) < 0)
 		return;
 	if (pid > 0) {
@@ -911,16 +1073,65 @@ open_browser(const char *url)
 				close(nul);
 		}
 	}
-	execlp(cmd, cmd, url, (char *)NULL);
+	if (cmd) {
+		execlp(cmd, cmd, url, (char *)NULL);
+		_exit(127);
+	}
+	snprintf(app, sizeof(app), "--app=%s", url);
+	for (i = 0; ids[i]; i++) {
+#ifdef __APPLE__
+		/* -n: a fresh process even if the browser is running; it hands
+		 * the window to the running one and exits. -b: by bundle id, so
+		 * a missing browser is a clean failure rather than a dialog. */
+		char *const argv[] = { "open", "-nb", (char *)ids[i], "--args",
+		    app, NULL };
+		if (run(argv) == 0)
+			_exit(0);
+#else
+		/* A browser that is not running stays in the foreground, so
+		 * this returns only once its window closes. Whatever it exits
+		 * with then, it did open; only "not found" moves on. */
+		char *const argv[] = { (char *)ids[i], app, NULL };
+		if (run(argv) != 127)
+			_exit(0);
+#endif
+	}
+	execlp(fallback, fallback, url, (char *)NULL);
 	_exit(127);
+}
+
+/* Without a path, the repository is the one the working directory sits in,
+ * found the way git finds its own; walking up stops at the filesystem root. */
+static int
+repo_above(char *buf, size_t n)
+{
+	char *slash;
+
+	if (!getcwd(buf, n))
+		return 0;
+	for (;;) {
+		if (is_graph_repo(buf))
+			return 1;
+		if (!(slash = strrchr(buf, '/')))
+			return 0;
+		if (slash == buf) {
+			if (buf[1] == '\0')
+				return 0;
+			buf[1] = '\0';	/* "/" itself, checked once more */
+		} else {
+			*slash = '\0';
+		}
+	}
 }
 
 int
 cmd_display(int argc, char *argv[])
 {
-	const char *path = NULL;
-	char url[64];
-	int port = 7373, i, srv, fd, notes, launch = 1, tries = 20;
+	const char *path = NULL, *shell;
+	char url[64], shellbuf[PATH_MAX];
+	int port = 7373, i, srv, fd, notes, launch = 1, tries = 20, bad = 0;
+	int follow = 0;
+	pid_t parent = getppid();
 
 	for (i = 0; i < argc; i++) {
 		if (!strcmp(argv[i], "--port") && i + 1 < argc) {
@@ -929,19 +1140,45 @@ cmd_display(int argc, char *argv[])
 		}
 		else if (!strcmp(argv[i], "--no-open"))
 			launch = 0;
-		else if (!path)
-			path = argv[i];
+		else if (!strcmp(argv[i], "--exit-with-parent"))
+			follow = 1;	/* for the shell: die with it, quietly */
+		else if (argv[i][0] == '-' || path)
+			bad = 1;
 		else
-			path = NULL;
+			path = argv[i];
 	}
-	if (!path || port <= 0 || port > 65535) {
-		fputs("usage: graph display <path> [--port <port>] [--no-open]\n", stderr);
+	if (bad || port <= 0 || port > 65535) {
+		fputs("usage: graph display [path] [--port <port>] [--no-open]\n", stderr);
 		return 1;
 	}
-	if (!realpath(path, repo_root))
-		die("cannot resolve %s: %s", path, strerror(errno));
+
+	/* A browser wants a browser, and a port asked for by number wants a
+	 * server here; otherwise the shell, when there is one and a desktop
+	 * to put it on. */
+	shell = NULL;
+	if (launch && tries > 1 && !getenv("BROWSER") && have_display())
+		shell = find_shell(shellbuf, sizeof(shellbuf));
+
+	if (path) {
+		if (!realpath(path, repo_root))
+			die("cannot resolve %s: %s", path, strerror(errno));
+	} else if (repo_above(repo_root, sizeof(repo_root))) {
+		;
+	} else if (shell) {
+		/* nothing to point at: the shell knows what was open last */
+		if (hand_to_shell(shell, NULL))
+			return 0;
+		die("not inside a Graph repository; give a path");
+	} else {
+		die("not inside a Graph repository; give a path");
+	}
 	if (!is_graph_repo(repo_root))
 		die("%s is not a Graph repository", repo_root);
+
+	if (shell && hand_to_shell(shell, repo_root)) {
+		printf("%s\n", repo_root);
+		return 0;
+	}
 
 	signal(SIGPIPE, SIG_IGN);	/* a browser that walks away is not fatal */
 
@@ -958,8 +1195,17 @@ cmd_display(int argc, char *argv[])
 		open_browser(url);	/* only once we know the port is ours */
 
 	for (;;) {
+		struct pollfd pfd = { srv, POLLIN, 0 };
+		int r = poll(&pfd, 1, follow ? 1000 : -1);
+
+		if (follow && getppid() != parent)
+			break;	/* the shell is gone; so is the reason to serve */
+		if (r < 0 && errno != EINTR)
+			break;
+		if (r <= 0)
+			continue;
 		if ((fd = accept(srv, NULL, NULL)) < 0) {
-			if (errno == EINTR)
+			if (errno == EINTR || errno == ECONNABORTED)
 				continue;
 			break;
 		}

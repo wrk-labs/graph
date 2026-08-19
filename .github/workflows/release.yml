@@ -39,12 +39,14 @@ jobs:
             runner: ubuntu-24.04-arm     # arm64 native (GitHub-hosted)
     steps:
       - name: install build deps
-        # graph links against libc only; these are the packaging tools plus
-        # git for actions/checkout inside the container.
+        # graph itself links against libc only; GTK and WebKitGTK are for
+        # graph-shell, the display window. The rest is packaging plus git
+        # for actions/checkout inside the container.
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
-            build-essential dpkg-dev fakeroot ca-certificates git
+            build-essential dpkg-dev fakeroot ca-certificates git \
+            pkg-config libgtk-3-dev libwebkit2gtk-4.0-dev
 
       - name: checkout
         uses: actions/checkout@v4
@@ -79,19 +81,20 @@ jobs:
 
       - name: build
         # Floor of macOS 12 — covers anything actively maintained. No build
-        # dependencies: graph uses libc and POSIX only.
+        # dependencies beyond the system frameworks: graph uses libc and
+        # POSIX, Graph.app uses Cocoa and WebKit.
         run: make
         env:
           MACOSX_DEPLOYMENT_TARGET: "12.0"
 
       - name: package tarball
-        # Flat tarball (graph + LICENSE at root), matching the layout the
-        # publisher expects and a binary-style formula would install from.
+        # Flat tarball (graph + Graph.app + LICENSE at root): what the cask
+        # in Casks/ installs from.
         run: |
           VER=$(cat VERSION)
           ARCH=${{ matrix.arch }}
           mkdir -p dist
-          tar -czf "dist/graph-${VER}-darwin-${ARCH}.tar.gz" graph LICENSE
+          tar -czf "dist/graph-${VER}-darwin-${ARCH}.tar.gz" graph Graph.app LICENSE
           ls -la dist/
 
       - name: upload artifact
