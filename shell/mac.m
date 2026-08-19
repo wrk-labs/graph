@@ -242,6 +242,38 @@ isLinkOut(NSURL *u)
 	decide(WKNavigationActionPolicyCancel);
 }
 
+/* confirm() and alert(): without these a WKWebView answers every confirm
+ * with "no", silently — so :rm and "discard changes?" could never go
+ * through. A sheet on the tab's window, like any other native prompt. */
+- (void)webView:(WKWebView *)w
+    runJavaScriptConfirmPanelWithMessage:(NSString *)msg
+    initiatedByFrame:(WKFrameInfo *)frame
+    completionHandler:(void (^)(BOOL))done
+{
+	NSAlert *a = [NSAlert new];
+
+	a.messageText = msg;
+	[a addButtonWithTitle:@"OK"];
+	[a addButtonWithTitle:@"Cancel"];
+	[a beginSheetModalForWindow:self.window
+	    completionHandler:^(NSModalResponse r) {
+		done(r == NSAlertFirstButtonReturn);
+	}];
+}
+
+- (void)webView:(WKWebView *)w
+    runJavaScriptAlertPanelWithMessage:(NSString *)msg
+    initiatedByFrame:(WKFrameInfo *)frame
+    completionHandler:(void (^)(void))done
+{
+	NSAlert *a = [NSAlert new];
+
+	a.messageText = msg;
+	[a addButtonWithTitle:@"OK"];
+	[a beginSheetModalForWindow:self.window
+	    completionHandler:^(NSModalResponse r) { (void)r; done(); }];
+}
+
 /* target=_blank and window.open: same rule, no second window. */
 - (WKWebView *)webView:(WKWebView *)w
     createWebViewWithConfiguration:(WKWebViewConfiguration *)c
