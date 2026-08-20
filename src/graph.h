@@ -20,6 +20,12 @@
 /* commands */
 int cmd_init(int argc, char *argv[]);
 int cmd_display(int argc, char *argv[]);
+int cmd_config(int argc, char *argv[]);
+int cmd_serve(int argc, char *argv[]);
+int cmd_unserve(int argc, char *argv[]);
+int cmd_connect(int argc, char *argv[]);
+int cmd_disconnect(int argc, char *argv[]);
+int cmd_status(int argc, char *argv[]);
 
 /* True when there is a desktop to open a window on. */
 int have_display(void);

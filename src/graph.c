@@ -16,6 +16,14 @@ usage(FILE *out)
 	    "  init <path>              create a Graph repository\n"
 	    "  display [path] [--port <port>] [--no-open]\n"
 	    "                           open a local view of a repository\n"
+	    "  config --address <addr>  configure the SMB server\n"
+	    "  serve <path> --name <name> [--user <user>]\n"
+	    "                           expose a repository through SMB\n"
+	    "  unserve <name>           stop serving a repository\n"
+	    "  connect <address> <name> --to=<destination>\n"
+	    "                           mount a remote repository\n"
+	    "  disconnect <destination> release a connected repository\n"
+	    "  status                   what is served and what is connected\n"
 	    "\n"
 	    "  -v, --version  print version\n"
 	    "  -h, --help     print this message\n",
@@ -52,6 +60,18 @@ main(int argc, char *argv[])
 		return cmd_init(argc - 2, argv + 2);
 	if (!strcmp(cmd, "display"))
 		return cmd_display(argc - 2, argv + 2);
+	if (!strcmp(cmd, "config"))
+		return cmd_config(argc - 2, argv + 2);
+	if (!strcmp(cmd, "serve"))
+		return cmd_serve(argc - 2, argv + 2);
+	if (!strcmp(cmd, "unserve"))
+		return cmd_unserve(argc - 2, argv + 2);
+	if (!strcmp(cmd, "connect"))
+		return cmd_connect(argc - 2, argv + 2);
+	if (!strcmp(cmd, "disconnect"))
+		return cmd_disconnect(argc - 2, argv + 2);
+	if (!strcmp(cmd, "status"))
+		return cmd_status(argc - 2, argv + 2);
 
 	warn("unknown command: %s", cmd);
 	usage(stderr);
