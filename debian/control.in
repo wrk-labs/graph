@@ -5,10 +5,16 @@ Priority: optional
 Architecture: __ARCH__
 Maintainer: willgcr <hello@willgcr.me>
 Depends: libc6
+Recommends: libgtk-3-0, libwebkit2gtk-4.0-37
 Suggests: samba, cifs-utils
 Homepage: https://wrklabs.org/graph
-Description: filesystem repository shared over SMB
- graph initialises an ordinary directory as a repository for documents,
- records, notes and media, serves it over SMB through Samba, and mounts
- it from other machines. The repository stays a plain directory tree,
- readable and editable with the tools already on the system.
+Description: personal knowledge hub
+ graph turns an ordinary directory into a repository for the things you
+ keep — people, organizations, finances, research, notes, media, whatever
+ accumulates — shows it as one connected whole, and shares it over SMB so
+ every machine you own can reach it. The repository stays a plain
+ directory tree, readable and editable with the tools already on the
+ system.
+ .
+ graph display opens a local view of a repository in a small native
+ window (WebKitGTK, recommended) or, without it, in the browser.

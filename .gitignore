@@ -1,4 +1,9 @@
 graph
 *.o
+src/ui.h
 *.bak
 dist/
+tmp/
+.*.swp
+Graph.app/
+graph-shell

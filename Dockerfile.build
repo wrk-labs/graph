@@ -17,6 +17,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         dpkg-dev \
         fakeroot \
         ca-certificates \
+        pkg-config \
+        libgtk-3-dev \
+        libwebkit2gtk-4.0-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src

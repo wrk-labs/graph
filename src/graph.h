@@ -1,5 +1,5 @@
 /* See LICENSE file for copyright and license details. */
-/* graph — filesystem repository over SMB */
+/* graph — personal knowledge hub */
 
 #ifndef GRAPH_H
 #define GRAPH_H
@@ -19,6 +19,10 @@
 
 /* commands */
 int cmd_init(int argc, char *argv[]);
+int cmd_display(int argc, char *argv[]);
+
+/* True when there is a desktop to open a window on. */
+int have_display(void);
 
 /* util.c */
 void die(const char *fmt, ...);
