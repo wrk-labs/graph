@@ -20,7 +20,7 @@ usage(void)
 }
 
 /* Reads a password without echoing it. It is never passed as an argument, so
- * it does not reach the process list or the shell's history (§10). */
+ * it does not reach the process list or the shell's history. */
 static int
 read_password(const char *prompt, char *dst, size_t size)
 {
@@ -66,7 +66,7 @@ confirm(const char *prompt)
 
 /* Ensures user exists in Samba, creating it only with the operator's consent.
  * Samba remains the authority: graph inspects the current state rather than
- * tracking users of its own (§10). */
+ * tracking users of its own. */
 static int
 ensure_user(const char *user)
 {
@@ -82,7 +82,7 @@ ensure_user(const char *user)
 
 	if (smb_user_exists(user)) {
 		/* An existing user is reused as it is: graph must not modify a
-		 * password it was not asked to change (§10). */
+		 * password it was not asked to change. */
 		printf("SMB user \"%s\" found\n", user);
 		return 0;
 	}
@@ -171,7 +171,7 @@ cmd_serve(int argc, char *argv[])
 		return 1;
 
 	/* graph must never expose a directory that is not a repository, and
-	 * must not initialize one during serve (§8). */
+	 * must not initialize one during serve. */
 	if (!is_graph_repo(path)) {
 		warn("%s is not a Graph repository.", path);
 		warn("Create one with: graph init %s", path);
@@ -185,7 +185,7 @@ cmd_serve(int argc, char *argv[])
 
 	/* The share sections graph generates depend on Samba's VFS modules.
 	 * Without them a share is served but refuses every connection, so it
-	 * is treated like any other missing prerequisite (§8). */
+	 * is treated like any other missing prerequisite. */
 	{
 		char missing[256];
 
@@ -204,7 +204,7 @@ cmd_serve(int argc, char *argv[])
 		return 1;
 	}
 	/* No address is ever assumed. Samba's own default is every interface,
-	 * and exposure must always be an explicit decision (§8). */
+	 * and exposure must always be an explicit decision. */
 	if (conf.naddrs == 0) {
 		warn("no listening address is configured.");
 		warn("Configure one first: graph config --address <address>");
@@ -215,7 +215,7 @@ cmd_serve(int argc, char *argv[])
 	for (i = 0; i < conf.nshares; i++) {
 		if (strcmp(conf.shares[i].name, name) != 0)
 			continue;
-		/* A share name is a stable SMB identity (§8). Repointing one
+		/* A share name is a stable SMB identity. Repointing one
 		 * would swap the filesystem under a client that has it
 		 * mounted, so the name is refused rather than moved. */
 		if (strcmp(conf.shares[i].path, root) != 0) {
@@ -338,7 +338,7 @@ cmd_unserve(int argc, char *argv[])
 	 *
 	 * The repository itself is untouched: unserve withdraws a share, not
 	 * data. The SMB user is left alone too, since Samba owns users and
-	 * graph must not remove one it did not create (§10). */
+	 * graph must not remove one it did not create. */
 	printf("%s no longer served\n", name);
 
 	if (conf.nshares > 0) {

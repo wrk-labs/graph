@@ -13,10 +13,10 @@
 #ifdef __linux__
 #include <sys/vfs.h>
 /* The kernel reports a different superblock magic per SMB generation. A share
- * graph serves negotiates SMB2 or later (§9.6 rules out SMB1), so SMB2_MAGIC
- * is the one seen in practice; CIFS_MAGIC is kept so a share mounted by other
- * means is still recognised as connected rather than treated as an ordinary
- * directory and unmounted by mistake. */
+ * graph serves negotiates SMB2 or later (graph never offers SMB1), so
+ * SMB2_MAGIC is the one seen in practice; CIFS_MAGIC is kept so a share
+ * mounted by other means is still recognised as connected rather than treated
+ * as an ordinary directory and unmounted by mistake. */
 #define CIFS_MAGIC 0xFF534D42	/* SMB1 */
 #define SMB2_MAGIC 0xFE534D42	/* SMB2 and later */
 #else
@@ -28,7 +28,7 @@
 #include "smb.h"
 
 /* Reads a line without echoing it, so a password never reaches the terminal,
- * the shell's history, or the process list (§12). */
+ * the shell's history, or the process list. */
 static int
 read_hidden(const char *prompt, char *dst, size_t size)
 {
@@ -175,7 +175,7 @@ cmd_connect(int argc, char *argv[])
 	}
 
 	/* The destination is always the user's choice; graph never picks a
-	 * mount location of its own (§12). It is not created either: a
+	 * mount location of its own. It is not created either: a
 	 * mistyped path should be reported, not silently brought into being. */
 	if (stat(to, &st) < 0) {
 		warn("%s does not exist.", to);
@@ -230,8 +230,7 @@ cmd_connect(int argc, char *argv[])
 
 		/* Mounted under the invoking user rather than root: graph is
 		 * run with sudo, but the repository belongs to the person who
-		 * asked for it, and must stay writable with ordinary tools
-		 * (§17.2). */
+		 * asked for it, and must stay writable with ordinary tools. */
 		if (sudo_uid && sudo_gid)
 			snprintf(opts, sizeof(opts),
 			    "credentials=%s,uid=%s,gid=%s", creds, sudo_uid,
@@ -296,7 +295,7 @@ cmd_disconnect(int argc, char *argv[])
 	}
 
 	/* Only a connected repository is released, so that an ordinary local
-	 * directory cannot be unmounted by mistake (§12). */
+	 * directory cannot be unmounted by mistake. */
 	rc = is_smb_mount(dest);
 	if (rc < 0) {
 		warn("cannot examine %s: %s", dest, strerror(errno));
@@ -319,7 +318,7 @@ cmd_disconnect(int argc, char *argv[])
 	rc = smb_run(args);
 
 	/* An unmount in use is reported rather than forced: forcing one on a
-	 * network share can discard writes that have not been flushed (§12). */
+	 * network share can discard writes that have not been flushed. */
 	if (rc != 0) {
 		warn("could not release %s", dest);
 		warn("Something is still using it. Close it and try again.");

@@ -112,7 +112,7 @@ cmd_status(int argc, char *argv[])
 	}
 
 	/* Serving is configured through Samba, which graph only drives on
-	 * Linux (§13); elsewhere there is nothing of graph's to report. */
+	 * Linux; elsewhere there is nothing of graph's to report. */
 	if (smb_on_linux()) {
 		printf("serving\n");
 		if (!smb_present()) {
@@ -138,7 +138,7 @@ cmd_status(int argc, char *argv[])
 				/* A served path can stop being a repository
 				 * underneath graph; the filesystem is the
 				 * truth, so it is checked rather than
-				 * assumed (§2.1). */
+				 * assumed. */
 				if (!is_graph_repo(s->path))
 					printf("  (no longer a repository)");
 				if (s->user[0])

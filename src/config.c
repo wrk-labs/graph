@@ -16,7 +16,7 @@ usage(void)
 }
 
 /* Shared by config and serve: both configure Samba, and both must refuse
- * rather than work around a machine that cannot support them (§8). */
+ * rather than work around a machine that cannot support them. */
 int
 smb_preconditions(const char *cmd)
 {
@@ -30,7 +30,7 @@ smb_preconditions(const char *cmd)
 		warn("Install it first: apt install samba");
 		return -1;
 	}
-	/* Graph does not escalate privileges on its own (§8). */
+	/* Graph does not escalate privileges on its own. */
 	if (geteuid() != 0) {
 		warn("graph %s needs root to configure Samba.", cmd);
 		warn("Run it again with sudo.");
@@ -40,7 +40,7 @@ smb_preconditions(const char *cmd)
 }
 
 /* Reports what installing a configuration did, so that replacing someone
- * else's Samba configuration is never silent (§9.4). */
+ * else's Samba configuration is never silent. */
 void
 smb_report(enum smb_write how)
 {
@@ -62,7 +62,7 @@ cmd_config(int argc, char *argv[])
 
 	/* Each run states the whole address list. What is passed is what is
 	 * served, so an address is dropped by leaving it out rather than by a
-	 * removal flag; that keeps the CLI at the five operations of §6. */
+	 * removal flag; that keeps the CLI to its few fixed operations. */
 	for (i = 0; (int)i < argc; i++) {
 		if (strcmp(argv[i], "--address") != 0) {
 			usage();
@@ -103,7 +103,7 @@ cmd_config(int argc, char *argv[])
 	}
 
 	/* Carry forward the shares serve established: config sets the address
-	 * the server listens on, and must not disturb what is served (§9.1). */
+	 * the server listens on, and must not disturb what is served. */
 	if (smb_read(&conf) < 0) {
 		warn("cannot read %s", SMB_CONF);
 		return 1;

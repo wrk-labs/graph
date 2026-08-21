@@ -23,7 +23,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Debian's package leaves a stock configuration in place. Remove it: graph
-# assumes exclusive ownership of Samba (PLAN §9.4), and a first run must find
+# assumes exclusive ownership of Samba, and a first run must find
 # the machine in whichever state the test decides, not this one.
 RUN rm -f /etc/samba/smb.conf
 

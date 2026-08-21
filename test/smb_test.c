@@ -105,7 +105,7 @@ main(void)
 	check_has("points the share at the repository", text,
 	    "path = /tmp/graph-test/new");
 
-	/* §9.6 */
+	/* Graph repositories and nothing else. */
 	check_lacks("no home shares", text, "[homes]");
 	check_lacks("no printer shares", text, "[printers]");
 	check_has("no user-published shares", text, "usershare max shares = 0");
@@ -122,7 +122,7 @@ main(void)
 	    "vfs objects = fruit streams_xattr");
 	check_has("keeps it out of the tree", text, "fruit:metadata = stream");
 
-	/* A user is optional (§8); when absent nothing restricts the share to
+	/* A user is optional; when absent nothing restricts the share to
 	 * one, and when present it must. */
 	check_lacks("no valid users without a user", text, "valid users");
 	snprintf(conf.shares[0].user, SMB_USER_MAX, "will");
@@ -233,7 +233,7 @@ main(void)
 	}
 
 	/* A configuration graph did not write must not be carried forward: its
-	 * shares are not Graph repositories (§9.6). */
+	 * shares are not Graph repositories. */
 	put_file(SMB_CONF, foreign);
 	{
 		struct smb_conf back;
@@ -271,7 +271,7 @@ main(void)
 		    !strcmp(text, other));
 	}
 
-	/* Serving a second repository must keep the first (§8). */
+	/* Serving a second repository must keep the first. */
 	{
 		struct smb_conf back;
 		char multi[65536];

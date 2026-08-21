@@ -174,7 +174,7 @@ group "graph serve"
 
 rm -f /etc/samba/smb.conf /etc/samba/smb.conf.pre-graph
 
-# An address must be configured first: exposure is never assumed (§8).
+# An address must be configured first: exposure is never assumed.
 out=$("$GRAPH" serve "$WORK/new" --name opsys 2>&1)
 check_contains "refuses before an address is configured" "$out" \
 	"no listening address is configured"
@@ -207,7 +207,7 @@ check_contains "points it at the repository" \
 	"$(grep -A1 '^\[opsys\]' /etc/samba/smb.conf)" "$WORK/new"
 check_status "the configuration is valid" 0 testparm -s /etc/samba/smb.conf
 
-# A second repository must not disturb the first (§8).
+# A second repository must not disturb the first.
 "$GRAPH" serve "$WORK/empty" --name work >/dev/null 2>&1
 check_contains "keeps the first share" "$(grep -c '^\[opsys\]' /etc/samba/smb.conf)" "1"
 check_contains "adds the second share" "$(grep -c '^\[work\]' /etc/samba/smb.conf)" "1"
@@ -243,7 +243,7 @@ check_contains "smbd lists the first repository" "$served" "opsys"
 check_contains "smbd lists the second repository" "$served" "work"
 
 # A share serves no one anonymously, even with no --user given: guest access
-# is ruled out for every share graph generates (§9.6).
+# is ruled out for every share graph generates.
 for share in opsys work; do
 	anon=$(smbclient -N "//127.0.0.1/$share" -c ls 2>&1)
 	case "$anon" in
@@ -288,7 +288,7 @@ fi
 
 # --- SMB users ------------------------------------------------------------
 # Samba stays the authority: graph inspects it rather than keeping a record
-# of its own (§10). The prompts read standard input, so they drive here.
+# of its own. The prompts read standard input, so they drive here.
 
 group "smb users"
 
@@ -325,7 +325,7 @@ check_contains "Samba knows the user" \
 check_contains "restricts the share to the user" \
 	"$(sed -n '/^\[sec\]/,/^\[/p' /etc/samba/smb.conf)" "valid users = graphtest"
 
-# An existing user is reused, and its password is not touched (§10).
+# An existing user is reused, and its password is not touched.
 before=$(pdbedit -Lw graphtest 2>/dev/null)
 "$GRAPH" init "$WORK/secure2" >/dev/null 2>&1
 out=$(printf '' | "$GRAPH" serve "$WORK/secure2" --name sec2 --user graphtest 2>&1)
@@ -461,7 +461,7 @@ esac
 check "the repository is visible through it" \
 	"$([ -f "$WORK/mnt/.graph/repository" ] && echo y || echo n)" "y"
 
-# A repository reached over SMB must stay writable with ordinary tools (§17.2).
+# A repository reached over SMB must stay writable with ordinary tools.
 if echo written-over-smb > "$WORK/mnt/note.md" 2>/dev/null; then
 	ok "a file can be written through the mount"
 	check "it landed in the served repository" \
@@ -599,7 +599,7 @@ shares=$(smbclient -N -L 127.0.0.1 2>&1)
 check_contains "smbd serves the configured share" "$shares" "probe"
 
 # testparm must reject a broken configuration, or validating before install
-# (PLAN §9.5) proves nothing.
+# proves nothing.
 printf '[global]\n\tinterfaces = 127.0.0.1\n[bad\n' > "$WORK/broken.conf"
 check_status "testparm rejects a malformed configuration" 1 \
 	testparm -s "$WORK/broken.conf"
