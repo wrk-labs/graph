@@ -25,6 +25,10 @@ mkdir -p "$WORK" || exit 1
 mkdir -p "$BUILD" || exit 1
 cp -R Makefile VERSION src tools "$BUILD"/ || exit 1
 
+# The host tree may carry objects built for another platform, and make would
+# take them as up to date. Clean the copy so it builds from sources alone.
+(cd "$BUILD" && make -s clean) >/dev/null 2>&1
+
 group "build"
 if (cd "$BUILD" && make -s) >/dev/null 2>&1; then
 	ok "builds clean"
