@@ -27,8 +27,10 @@
 #include "graph.h"
 #include "smb.h"
 
+#ifdef __linux__
 /* Reads a line without echoing it, so a password never reaches the terminal,
- * the shell's history, or the process list. */
+ * the shell's history, or the process list. Linux-only: on macOS the password
+ * is mount_smbfs's to ask for. */
 static int
 read_hidden(const char *prompt, char *dst, size_t size)
 {
@@ -58,6 +60,7 @@ read_hidden(const char *prompt, char *dst, size_t size)
 		dst[len - 1] = '\0';
 	return 0;
 }
+#endif
 
 static int
 read_line(const char *prompt, char *dst, size_t size)
@@ -131,7 +134,7 @@ write_credentials(char *path, size_t size, const char *user, const char *pass)
 int
 cmd_connect(int argc, char *argv[])
 {
-	char user[SMB_USER_MAX], pass[256];
+	char user[SMB_USER_MAX];
 	char source[PATH_MAX], dest[PATH_MAX];
 	const char *addr = NULL, *name = NULL, *to = NULL;
 	struct stat st;
@@ -201,8 +204,7 @@ cmd_connect(int argc, char *argv[])
 		return 1;
 	}
 
-	if (read_line("Username: ", user, sizeof(user)) < 0 ||
-	    read_hidden("Password: ", pass, sizeof(pass)) < 0) {
+	if (read_line("Username: ", user, sizeof(user)) < 0) {
 		warn("could not read the credentials");
 		return 1;
 	}
@@ -215,11 +217,17 @@ cmd_connect(int argc, char *argv[])
 
 #ifdef __linux__
 	{
+		char pass[256];
 		char creds[PATH_MAX];
 		char opts[PATH_MAX + 128];
 		char *args[8];
 		const char *sudo_uid = getenv("SUDO_UID");
 		const char *sudo_gid = getenv("SUDO_GID");
+
+		if (read_hidden("Password: ", pass, sizeof(pass)) < 0) {
+			warn("could not read the credentials");
+			return 1;
+		}
 
 		if (write_credentials(creds, sizeof(creds), user, pass) < 0) {
 			warn("could not store the credentials safely");
@@ -255,9 +263,9 @@ cmd_connect(int argc, char *argv[])
 		char url[PATH_MAX];
 		char *args[4];
 
-		/* mount_smbfs asks for the password itself, so it is never
-		 * handed over as an argument. */
-		memset(pass, 0, sizeof(pass));
+		/* mount_smbfs prompts for the password itself, so graph does
+		 * not ask for one of its own, and it is never handed over as
+		 * an argument. */
 		snprintf(url, sizeof(url), "//%s@%s/%s", user, addr, name);
 		args[0] = (char *)"mount_smbfs";
 		args[1] = url;
