@@ -6,7 +6,7 @@ Architecture: __ARCH__
 Maintainer: willgcr <hello@willgcr.me>
 Depends: libc6
 Recommends: libgtk-3-0, libwebkit2gtk-4.0-37
-Suggests: samba, cifs-utils
+Suggests: samba, samba-vfs-modules, cifs-utils
 Homepage: https://wrklabs.org/graph
 Description: personal knowledge hub
  graph turns an ordinary directory into a repository for the things you

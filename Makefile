@@ -15,7 +15,7 @@ endif
 CFLAGS  += -std=c99 -pedantic -Wall -Wextra -Os \
            -D_XOPEN_SOURCE=700 -DVERSION=\"$(VERSION)\"
 
-SRC = src/graph.c src/init.c src/display.c src/util.c
+SRC = src/graph.c src/init.c src/display.c src/config.c src/serve.c src/connect.c src/status.c src/smb.c src/util.c
 OBJ = $(SRC:.c=.o)
 BIN = graph
 
@@ -41,6 +41,7 @@ all: $(BIN) $(SHELL_BIN)
 	$(CC) -c $(CFLAGS) -o $@ $<
 
 $(OBJ): src/graph.h
+src/smb.o src/config.o src/serve.o src/connect.o src/status.o: src/smb.h
 src/display.o: src/ui.h
 
 # UI is authored as HTML and embedded so the binary stays self-contained.
@@ -67,6 +68,16 @@ graph-shell: shell/linux.c
 
 clean:
 	rm -rf $(BIN) $(OBJ) src/ui.h Graph.app graph-shell
+
+# --- tests ---
+# The suite reconfigures Samba and must not touch a real machine, so it only
+# runs in the container from Dockerfile.test. It is --privileged because
+# connect mounts a real SMB share, which needs kernel privileges no ordinary
+# container has; the container is throwaway and the source is mounted read
+# only.
+test:
+	docker build -q -f Dockerfile.test -t graph-test .
+	docker run --rm --privileged -v "$$PWD:/src:ro" -w /src graph-test
 
 install: all
 	mkdir -p $(DESTDIR)$(PREFIX)/bin
@@ -121,4 +132,4 @@ endif
 	@echo
 	@echo "  built $(DEB_FILE)"
 
-.PHONY: all clean install uninstall deb
+.PHONY: all clean install uninstall deb test

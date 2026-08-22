@@ -41,6 +41,14 @@ Release it when you are done:
 
     graph disconnect /home/opsys
 
+Stop sharing it:
+
+    graph unserve opsys
+
+See what is served and what is connected:
+
+    graph status
+
 Look at it:
 
     graph display /srv/graph
@@ -84,9 +92,19 @@ draws them; in the files themselves they are ordinary text.
 
 ## Requirements
 
-Serving needs Samba and runs on Linux. Connecting works on Linux and macOS.
-Display works on both; the window uses WebKit on macOS and WebKitGTK on
-Linux, and falls back to your browser where that is not available.
+Serving needs Samba, along with its VFS modules (`samba-vfs-modules` on Debian
+and Ubuntu), and runs on Linux. Connecting needs SMB mount support — `cifs-utils`
+on Linux, built in on macOS — and works on both. Display works on both; the
+window uses WebKit on macOS and WebKitGTK on Linux, and falls back to your
+browser where that is not available.
+
+Graph generates the whole Samba configuration and assumes the machine is not
+already serving SMB for something else. The configuration in place before Graph
+first ran is kept at `/etc/samba/smb.conf.pre-graph`.
+
+Whether the SMB service starts at boot is left to the init system. Disable it
+(`systemctl disable smbd`) and `graph serve` will start it when you ask for a
+repository; `graph unserve` stops it again once nothing is left to serve.
 
 ## Status
 

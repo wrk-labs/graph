@@ -23,9 +23,22 @@ jobs:
           fi
           echo "tag and VERSION match: $TAG_VER"
 
+  test:
+    name: run test suite
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: test
+        # Builds the Samba container from Dockerfile.test and runs the suite
+        # inside it. Privileged because connect mounts a real SMB share.
+        run: make test
+
   linux-build:
     name: build .deb (${{ matrix.arch }})
-    needs: verify
+    needs: test
     runs-on: ${{ matrix.runner }}
     container: debian:bullseye-slim   # oldest still-supported glibc → runs on
                                       # bullseye/bookworm/trixie/Ubuntu 22.04+
@@ -65,7 +78,7 @@ jobs:
 
   macos-build:
     name: build darwin tarball (${{ matrix.arch }})
-    needs: verify
+    needs: test
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false

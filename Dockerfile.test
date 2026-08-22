@@ -1,0 +1,31 @@
+# Test environment for graph's SMB support.
+#
+#   docker build -f Dockerfile.test -t graph-test .
+#   docker run --rm --privileged -v "$PWD:/src:ro" -w /src graph-test
+#
+# Carries a real Samba so the generated configuration can be validated with
+# testparm and the shares it defines can actually be served and listed. The
+# container has no systemd, so the harness starts smbd itself; the service
+# restart graph performs on a real host is not exercised here.
+
+FROM debian:bullseye-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        samba \
+        samba-common-bin \
+        samba-vfs-modules \
+        smbclient \
+        cifs-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+# Debian's package leaves a stock configuration in place. Remove it: graph
+# assumes exclusive ownership of Samba, and a first run must find
+# the machine in whichever state the test decides, not this one.
+RUN rm -f /etc/samba/smb.conf
+
+WORKDIR /src
+CMD ["sh", "test/run.sh"]
