@@ -12,7 +12,7 @@ cask "graph" do
   desc "Personal knowledge hub"
   homepage "https://wrklabs.org/graph"
 
-  depends_on macos: ">= :monterey"
+  depends_on macos: :monterey
   depends_on arch: :arm64
 
   app "Graph.app"
