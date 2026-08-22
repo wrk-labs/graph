@@ -23,7 +23,7 @@ mkdir -p "$WORK" || exit 1
 # to a scratch copy. Building in place would leave root-owned objects in the
 # working tree and break the next build on the host.
 mkdir -p "$BUILD" || exit 1
-cp -R Makefile VERSION src tools "$BUILD"/ || exit 1
+cp -R Makefile VERSION src tools templates "$BUILD"/ || exit 1
 
 # The host tree may carry objects built for another platform, and make would
 # take them as up to date. Clean the copy so it builds from sources alone.
@@ -48,10 +48,24 @@ check "writes the marker" \
 	"$(cat "$WORK/new/.graph/repository" 2>/dev/null)" "version=1"
 
 missing=
-for d in inbox people organizations finance research knowledge archive; do
+for d in inbox people organizations finance research knowledge archive \
+	journal journal/agents; do
 	[ -d "$WORK/new/$d" ] || missing="$missing $d"
 done
 check "creates the default layout" "$missing" ""
+
+# Every default directory explains itself, and AGENTS.md explains the whole:
+# the guidance is part of the repository, not of the tool.
+missing=
+for f in AGENTS.md README.md inbox/README.md people/README.md \
+	organizations/README.md finance/README.md research/README.md \
+	knowledge/README.md archive/README.md journal/README.md \
+	journal/agents/README.md; do
+	[ -s "$WORK/new/$f" ] || missing="$missing $f"
+done
+check "writes AGENTS.md and a README in each directory" "$missing" ""
+check_contains "AGENTS.md describes the link convention" \
+	"$(cat "$WORK/new/AGENTS.md")" "[[people/"
 
 mkdir -p "$WORK/empty"
 check_status "accepts an existing empty directory" 0 "$GRAPH" init "$WORK/empty"

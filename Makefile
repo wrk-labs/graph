@@ -43,10 +43,17 @@ all: $(BIN) $(SHELL_BIN)
 $(OBJ): src/graph.h
 src/smb.o src/config.o src/serve.o src/connect.o src/status.o: src/smb.h
 src/display.o: src/ui.h
+src/init.o: src/templates.h
 
 # UI is authored as HTML and embedded so the binary stays self-contained.
 src/ui.h: src/ui.html tools/embed.sh
 	sh tools/embed.sh src/ui.html ui_html > $@
+
+# The files init writes into a new repository — AGENTS.md and the README of
+# each default directory — are authored as Markdown and embedded the same way.
+TEMPLATES := $(shell find templates -type f)
+src/templates.h: $(TEMPLATES) tools/templates.sh tools/embed.sh
+	sh tools/templates.sh templates > $@
 
 $(BIN): $(OBJ)
 	$(CC) -o $@ $(OBJ) $(LDFLAGS)
@@ -67,7 +74,7 @@ graph-shell: shell/linux.c
 	    $(shell pkg-config --cflags --libs gtk+-3.0 $(WEBKIT))
 
 clean:
-	rm -rf $(BIN) $(OBJ) src/ui.h Graph.app graph-shell
+	rm -rf $(BIN) $(OBJ) src/ui.h src/templates.h Graph.app graph-shell
 
 # --- tests ---
 # The suite reconfigures Samba and must not touch a real machine, so it only

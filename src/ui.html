@@ -28,6 +28,7 @@
   --d-research:      #cf6a95;
   --d-knowledge:     #17a2a2;
   --d-archive:       #6b7f88;
+  --d-journal:       #c9a227;
 
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
@@ -461,7 +462,7 @@ table.ls td.zero { color: var(--ghost); }
 /* Domain colours apply to the default directories when they exist. Anything
  * else simply renders without one — the layout is a convention, so the view
  * recognises it without depending on it. */
-var DOM = ["inbox", "people", "organizations", "finance", "research", "knowledge", "archive"];
+var DOM = ["inbox", "people", "organizations", "finance", "research", "knowledge", "archive", "journal"];
 
 var G = {nodes: [], edges: [], root: ""};
 var N = [];                 /* enriched nodes */

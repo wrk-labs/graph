@@ -8,6 +8,7 @@
 #include <sys/stat.h>
 
 #include "graph.h"
+#include "templates.h"
 
 /* The default structure. A recommended starting point rather than a schema:
  * nothing downstream depends on these names, and users are free to rename,
@@ -21,7 +22,31 @@ static const char *layout[] = {
 	"research",
 	"knowledge",
 	"archive",
+	"journal",
+	"journal/agents",
 };
+
+/* AGENTS.md and the README of each default directory. They describe the
+ * layout and its conventions to whoever — or whatever — reads the repository
+ * next, and are ordinary files from then on: the user may edit or delete them,
+ * and nothing in Graph depends on their contents. */
+static void
+write_templates(const char *root)
+{
+	char path[PATH_MAX];
+	FILE *f;
+	size_t i;
+
+	for (i = 0; i < sizeof(templates) / sizeof(*templates); i++) {
+		if (join_path(path, sizeof(path), root, templates[i].path) < 0)
+			die("path too long: %s/%s", root, templates[i].path);
+		if (!(f = fopen(path, "w")))
+			die("cannot write %s: %s", path, strerror(errno));
+		if (fwrite(templates[i].data, 1, templates[i].len, f) !=
+		    templates[i].len || fclose(f) != 0)
+			die("cannot write %s: %s", path, strerror(errno));
+	}
+}
 
 static void
 write_marker(const char *root)
@@ -81,6 +106,7 @@ cmd_init(int argc, char *argv[])
 			die("cannot create %s: %s", path, strerror(errno));
 	}
 
+	write_templates(root);
 	write_marker(root);
 
 	printf("created Graph repository at %s\n", root);

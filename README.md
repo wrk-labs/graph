@@ -75,7 +75,14 @@ through it.
     ├── finance/
     ├── research/
     ├── knowledge/
-    └── archive/
+    ├── archive/
+    └── journal/
+        └── agents/
+
+along with an `AGENTS.md` at the root and a `README.md` in each directory.
+They say what belongs where and how entries are shaped, named and linked —
+for you, and for any agent you point at the repository. They are ordinary
+files: edit them as the tree becomes yours, or delete them.
 
 Rearrange it however suits you. Nest projects under an organization, scope
 research to a client, create your own directories. Graph looks for its marker in
