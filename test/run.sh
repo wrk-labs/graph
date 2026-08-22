@@ -480,7 +480,9 @@ check "the served repository still has the file" \
 	"$(cat "$WORK/shared/note.md" 2>/dev/null)" "written-over-smb"
 out=$("$GRAPH" disconnect "$WORK/mnt" 2>&1)
 check_contains "refuses to release it twice" "$out" "is not a connected"
-pkill smbd 2>/dev/null
+# smbd stays up through the status group. The kernel's SMB client keeps its
+# session to 127.0.0.1 across mounts, and a server restarted underneath it
+# makes the next mount fail with "host is down" until it notices.
 
 # --- graph status ---------------------------------------------------------
 # Read-only, and needs no root: the configuration is readable and the kernel
@@ -529,11 +531,17 @@ adduser --disabled-password --gecos "" statuser >/dev/null 2>&1
 chown -R statuser:statuser "$WORK/statrepo"
 printf 'stat-pw-1\nstat-pw-1\n' | smbpasswd -s -a statuser >/dev/null 2>&1
 "$GRAPH" serve "$WORK/statrepo" --name statshare --user statuser >/dev/null 2>&1
-start_smbd || fail "smbd came up" "no answer on 127.0.0.1"
+# The smbd from the connect group picks the new share up from the rewritten
+# configuration on the next connection; it is only checked to be answering.
+wait_smbd || fail "smbd is answering" "no answer on 127.0.0.1"
 mkdir -p "$WORK/statmnt"
 out=$(printf 'statuser\nstat-pw-1\n' | "$GRAPH" connect 127.0.0.1 statshare \
 	--to="$WORK/statmnt" 2>&1)
-check_contains "connects a repository to report" "$out" "connected at"
+case "$out" in
+*"connected at"*) ok "connects a repository to report" ;;
+*) fail "connects a repository to report" \
+	"$out; kernel: $(dmesg 2>/dev/null | grep -i cifs | tail -3)" ;;
+esac
 out=$("$GRAPH" status 2>&1)
 check_contains "reports a connected repository" "$out" "$WORK/statmnt"
 check_contains "names what it is connected to" "$out" "//127.0.0.1/statshare"

@@ -66,10 +66,8 @@ stop_smbd() {
 	done
 }
 
-# start_smbd: returns 0 once the server answers, 1 if it never did.
-start_smbd() {
-	stop_smbd
-	smbd -D 2>/dev/null
+# wait_smbd: returns 0 once the server answers, 1 if it never did.
+wait_smbd() {
 	i=0
 	while [ $i -lt 50 ]; do
 		smbclient -N -L 127.0.0.1 >/dev/null 2>&1 && return 0
@@ -77,6 +75,12 @@ start_smbd() {
 		i=$((i + 1))
 	done
 	return 1
+}
+
+start_smbd() {
+	stop_smbd
+	smbd -D 2>/dev/null
+	wait_smbd
 }
 
 summary() {
