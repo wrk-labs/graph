@@ -1,11 +1,13 @@
 # Homebrew cask for macOS. Installs Graph.app into /Applications — so it is
 # in Spotlight, Launchpad and the Dock — and links the graph command it
-# carries into PATH. Filled in from the release tarball the workflow builds.
+# carries into PATH. The wrklabs publisher fills in the version and the
+# sha256 of the release tarball it mirrors to brew.wrklabs.org, and commits
+# the result to the tap.
 cask "graph" do
   version "__VERSION__"
-  sha256 "__SHA__"
+  sha256 "__SHA_ARM64__"
 
-  url "https://github.com/wrk-labs/graph/releases/download/v#{version}/graph-#{version}-darwin-arm64.tar.gz"
+  url "https://brew.wrklabs.org/dist/graph/graph-#{version}-darwin-arm64.tar.gz"
   name "graph"
   desc "Personal knowledge hub"
   homepage "https://wrklabs.org/graph"
