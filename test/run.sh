@@ -235,13 +235,7 @@ check_contains "and says the share is not being served" "$out" \
 	"is not being served"
 
 # The point of all of it: the shares are actually served.
-pkill smbd 2>/dev/null
-smbd -D 2>/dev/null
-i=0
-while [ $i -lt 30 ]; do
-	smbclient -N -L 127.0.0.1 >/dev/null 2>&1 && break
-	i=$((i + 1))
-done
+start_smbd || fail "smbd came up" "no answer on 127.0.0.1"
 served=$(smbclient -N -L 127.0.0.1 2>&1)
 check_contains "smbd lists the first repository" "$served" "opsys"
 check_contains "smbd lists the second repository" "$served" "work"
@@ -338,13 +332,7 @@ after=$(pdbedit -Lw graphtest 2>/dev/null)
 check "leaves the password alone" "$before" "$after"
 
 # The share really is restricted: an anonymous client must not reach it.
-pkill smbd 2>/dev/null
-smbd -D 2>/dev/null
-i=0
-while [ $i -lt 30 ]; do
-	smbclient -N -L 127.0.0.1 >/dev/null 2>&1 && break
-	i=$((i + 1))
-done
+start_smbd || fail "smbd came up" "no answer on 127.0.0.1"
 anon=$(smbclient -N '//127.0.0.1/sec' -c 'ls' 2>&1)
 case "$anon" in
 *NT_STATUS_ACCESS_DENIED*|*NT_STATUS_LOGON_FAILURE*|*NT_STATUS_NO_SUCH_USER*)
@@ -446,12 +434,7 @@ adduser --disabled-password --gecos "" client >/dev/null 2>&1
 chown -R client:client "$WORK/shared"
 printf 'client-pw-1\nclient-pw-1\n' | smbpasswd -s -a client >/dev/null 2>&1
 "$GRAPH" serve "$WORK/shared" --name shared --user client >/dev/null 2>&1
-pkill smbd 2>/dev/null; smbd -D 2>/dev/null
-i=0
-while [ $i -lt 30 ]; do
-	smbclient -N -L 127.0.0.1 >/dev/null 2>&1 && break
-	i=$((i + 1))
-done
+start_smbd || fail "smbd came up" "no answer on 127.0.0.1"
 
 mkdir -p "$WORK/mnt"
 out=$(printf 'client\nclient-pw-1\n' | "$GRAPH" connect 127.0.0.1 shared --to="$WORK/mnt" 2>&1)
@@ -546,15 +529,11 @@ adduser --disabled-password --gecos "" statuser >/dev/null 2>&1
 chown -R statuser:statuser "$WORK/statrepo"
 printf 'stat-pw-1\nstat-pw-1\n' | smbpasswd -s -a statuser >/dev/null 2>&1
 "$GRAPH" serve "$WORK/statrepo" --name statshare --user statuser >/dev/null 2>&1
-pkill smbd 2>/dev/null; smbd -D 2>/dev/null
-i=0
-while [ $i -lt 30 ]; do
-	smbclient -N -L 127.0.0.1 >/dev/null 2>&1 && break
-	i=$((i + 1))
-done
+start_smbd || fail "smbd came up" "no answer on 127.0.0.1"
 mkdir -p "$WORK/statmnt"
-printf 'statuser\nstat-pw-1\n' | "$GRAPH" connect 127.0.0.1 statshare \
-	--to="$WORK/statmnt" >/dev/null 2>&1
+out=$(printf 'statuser\nstat-pw-1\n' | "$GRAPH" connect 127.0.0.1 statshare \
+	--to="$WORK/statmnt" 2>&1)
+check_contains "connects a repository to report" "$out" "connected at"
 out=$("$GRAPH" status 2>&1)
 check_contains "reports a connected repository" "$out" "$WORK/statmnt"
 check_contains "names what it is connected to" "$out" "//127.0.0.1/statshare"
@@ -592,12 +571,7 @@ EOF
 
 check_status "testparm accepts the configuration" 0 testparm -s /etc/samba/smb.conf
 
-smbd -D 2>/dev/null
-i=0
-while [ $i -lt 30 ]; do
-	smbclient -N -L 127.0.0.1 >/dev/null 2>&1 && break
-	i=$((i + 1))
-done
+start_smbd || fail "smbd came up" "no answer on 127.0.0.1"
 
 shares=$(smbclient -N -L 127.0.0.1 2>&1)
 check_contains "smbd serves the configured share" "$shares" "probe"

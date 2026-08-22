@@ -52,6 +52,33 @@ group() {
 	printf '\n%s\n' "$1"
 }
 
+# There is no systemd in the container, so the harness runs smbd itself.
+# Both directions wait: a new smbd cannot bind while the old one still holds
+# the port, and a client that asks before it listens is simply refused. Up
+# to ten seconds each way; on a loaded CI runner the old spin loop gave up
+# in milliseconds.
+stop_smbd() {
+	pkill smbd 2>/dev/null
+	i=0
+	while pgrep smbd >/dev/null 2>&1 && [ $i -lt 50 ]; do
+		sleep 0.2
+		i=$((i + 1))
+	done
+}
+
+# start_smbd: returns 0 once the server answers, 1 if it never did.
+start_smbd() {
+	stop_smbd
+	smbd -D 2>/dev/null
+	i=0
+	while [ $i -lt 50 ]; do
+		smbclient -N -L 127.0.0.1 >/dev/null 2>&1 && return 0
+		sleep 0.2
+		i=$((i + 1))
+	done
+	return 1
+}
+
 summary() {
 	printf '\n%d run, %d failed\n' "$tests_run" "$tests_failed"
 	[ "$tests_failed" -eq 0 ] || exit 1
