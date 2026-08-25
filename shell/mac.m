@@ -566,6 +566,31 @@ menus(void)
 	NSApp.mainMenu = bar;
 }
 
+/* ⌘1…⌘9 show the tab in that position, as in Safari and Terminal. Caught
+ * before dispatch rather than listed in a menu: nine "Tab N" items would say
+ * nothing the tab bar does not already show. */
+static void
+tabKeys(void)
+{
+	[NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown
+	    handler:^NSEvent *(NSEvent *e) {
+		NSEventModifierFlags mods = e.modifierFlags &
+		    NSEventModifierFlagDeviceIndependentFlagsMask;
+		NSString *c = e.charactersIgnoringModifiers;
+		NSWindowTabGroup *group;
+		NSUInteger i;
+
+		if (mods != NSEventModifierFlagCommand || c.length != 1 ||
+		    [c characterAtIndex:0] < '1' || [c characterAtIndex:0] > '9')
+			return e;
+		i = (NSUInteger)([c characterAtIndex:0] - '1');
+		group = NSApp.keyWindow.tabGroup;
+		if (group && i < group.windows.count)
+			group.selectedWindow = group.windows[i];
+		return nil;
+	}];
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -577,6 +602,7 @@ main(int argc, char *argv[])
 		app.tabs = [NSMutableArray new];
 		NSApp.delegate = app;
 		menus();
+		tabKeys();
 		[NSApp run];
 	}
 	return 0;

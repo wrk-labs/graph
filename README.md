@@ -55,7 +55,8 @@ Look at it:
 
 This opens the repository in a window of its own — notes, files and the links
 between them — and edits go straight back to the files. Each repository you
-open is a tab; run it again with another path, or use the + in the tab bar.
+open is a tab; run it again with another path, or use the + in the tab bar,
+and switch between them with ⌘1…9 (Ctrl+1…9 on Linux).
 Without a path it opens the repository you are in, or the ones you had open
 last. On macOS the window is Graph, installed with `graph` and there in
 Spotlight and the Dock like any other application. With `--no-open`, or where

@@ -537,6 +537,17 @@ act_next(GSimpleAction *a, GVariant *v, gpointer data)
 		gtk_notebook_prev_page(GTK_NOTEBOOK(book));
 }
 
+/* Ctrl+1…9 show the tab in that position. Past the last tab the notebook
+ * does nothing, which is the right answer. */
+static void
+act_tab(GSimpleAction *a, GVariant *v, gpointer data)
+{
+	(void)a; (void)data;
+	if (book)
+		gtk_notebook_set_current_page(GTK_NOTEBOOK(book),
+		    g_variant_get_int32(v) - 1);
+}
+
 static void
 ensure_window(void)
 {
@@ -633,6 +644,10 @@ on_startup(GApplication *a, gpointer data)
 	static const char *const k_prev[] = { "<Primary>Page_Up", NULL };
 	GSimpleAction *next = g_simple_action_new("next", NULL);
 	GSimpleAction *prev = g_simple_action_new("prev", NULL);
+	GSimpleAction *tab = g_simple_action_new("tab", G_VARIANT_TYPE_INT32);
+	char detailed[16], accel[16];
+	const char *k_tab[] = { accel, NULL };
+	int i;
 
 	(void)data;
 	g_action_map_add_action_entries(G_ACTION_MAP(a), acts, G_N_ELEMENTS(acts), NULL);
@@ -640,10 +655,18 @@ on_startup(GApplication *a, gpointer data)
 	g_signal_connect(prev, "activate", G_CALLBACK(act_next), GINT_TO_POINTER(-1));
 	g_action_map_add_action(G_ACTION_MAP(a), G_ACTION(next));
 	g_action_map_add_action(G_ACTION_MAP(a), G_ACTION(prev));
+	g_signal_connect(tab, "activate", G_CALLBACK(act_tab), NULL);
+	g_action_map_add_action(G_ACTION_MAP(a), G_ACTION(tab));
 	gtk_application_set_accels_for_action(GTK_APPLICATION(a), "app.new", k_new);
 	gtk_application_set_accels_for_action(GTK_APPLICATION(a), "app.close", k_close);
 	gtk_application_set_accels_for_action(GTK_APPLICATION(a), "app.next", k_next);
 	gtk_application_set_accels_for_action(GTK_APPLICATION(a), "app.prev", k_prev);
+	for (i = 1; i <= 9; i++) {
+		snprintf(detailed, sizeof(detailed), "app.tab(%d)", i);
+		snprintf(accel, sizeof(accel), "<Primary>%d", i);
+		gtk_application_set_accels_for_action(GTK_APPLICATION(a),
+		    detailed, k_tab);
+	}
 }
 
 int
