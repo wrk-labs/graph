@@ -2,6 +2,7 @@ graph
 *.o
 src/ui.h
 src/templates.h
+shell/term.h
 *.bak
 dist/
 tmp/
