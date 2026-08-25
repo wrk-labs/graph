@@ -634,119 +634,6 @@ send_raw(FILE *f, const char *rel)
 	free(body);
 }
 
-/* Create a note or a directory.
- *
- * The parent must already be part of the repository, which keeps creation
- * inside the tree by the same argument that protects reads, and an existing
- * path is refused rather than truncated. */
-static void
-create_path(FILE *f, const char *rel, int as_dir)
-{
-	char abs[PATH_MAX], parent[512], *slash;
-	struct stat st;
-	FILE *o;
-	int fd;
-
-	{
-		const char *c;
-
-		for (c = rel; *c; c++)
-			if ((unsigned char)*c < 0x20 || *c == 0x7f)
-				break;
-		if (!*rel || *c || strstr(rel, "..") || rel[0] == '/' ||
-		    strchr(rel, '\\') || rel[0] == '.' || strstr(rel, "/.")) {
-			/* no control characters, and no dotfiles: the scan
-			 * skips those, so one made here could never be shown
-			 * or removed again */
-			send_text(f, "400 Bad Request", "text/plain", "bad path", 8);
-			return;
-		}
-	}
-	snprintf(parent, sizeof(parent), "%s", rel);
-	if ((slash = strrchr(parent, '/'))) {
-		*slash = '\0';
-		if (find_node(parent) < 0) {
-			send_text(f, "404 Not Found", "text/plain", "no such directory", 17);
-			return;
-		}
-	}
-	if (join_path(abs, sizeof(abs), repo_root, rel) < 0) {
-		send_text(f, "400 Bad Request", "text/plain", "bad path", 8);
-		return;
-	}
-	if (stat(abs, &st) == 0) {
-		send_text(f, "409 Conflict", "text/plain", "already exists", 14);
-		return;
-	}
-
-	if (as_dir) {
-		if (mkdir(abs, 0755) < 0) {
-			send_text(f, "500 Internal Server Error", "text/plain",
-			    "cannot create", 13);
-			return;
-		}
-	} else {
-		/* O_EXCL so two clients cannot both believe they made it */
-		if ((fd = open(abs, O_WRONLY | O_CREAT | O_EXCL, 0644)) < 0) {
-			send_text(f, "500 Internal Server Error", "text/plain",
-			    "cannot create", 13);
-			return;
-		}
-		if ((o = fdopen(fd, "w"))) {
-			const char *base = (slash = strrchr(rel, '/')) ? slash + 1 : rel;
-			char title[256];
-			size_t n = strlen(base);
-
-			if (n > 3 && !strcasecmp(base + n - 3, ".md"))
-				n -= 3;
-			if (n >= sizeof(title))
-				n = sizeof(title) - 1;
-			memcpy(title, base, n);
-			title[n] = '\0';
-			fprintf(o, "# %s\n", title);
-			fclose(o);
-		} else {
-			close(fd);
-		}
-	}
-	send_text(f, "200 OK", "application/json", "{\"ok\":true}", 11);
-}
-
-/* Remove a note or an empty directory. Directories go through rmdir, so a
- * directory holding anything is refused — removing a tree is what a shell is
- * for, where the consequences are visible. */
-static void
-remove_path(FILE *f, const char *rel)
-{
-	char abs[PATH_MAX];
-	int i;
-
-	i = find_node(rel);
-	if (i < 0 || nodes[i].type == T_MISSING || !*rel) {
-		send_text(f, "404 Not Found", "text/plain", "not found", 9);
-		return;
-	}
-	if (join_path(abs, sizeof(abs), repo_root, rel) < 0) {
-		send_text(f, "400 Bad Request", "text/plain", "bad path", 8);
-		return;
-	}
-	if (nodes[i].type == T_DIR) {
-		if (rmdir(abs) < 0) {
-			if (errno == ENOTEMPTY || errno == EEXIST)
-				send_text(f, "409 Conflict", "text/plain",
-				    "directory is not empty", 22);
-			else
-				send_text(f, "500 Internal Server Error", "text/plain",
-				    "cannot remove", 13);
-			return;
-		}
-	} else if (unlink(abs) < 0) {
-		send_text(f, "500 Internal Server Error", "text/plain", "cannot remove", 13);
-		return;
-	}
-	send_text(f, "200 OK", "application/json", "{\"ok\":true}", 11);
-}
-
 /* Hand a file to whatever the desktop opens it with, or a directory to the
  * file manager. Same rules as a write: only a path the scan knows, and
  * never something the opener would run rather than show — an executable
@@ -923,7 +810,7 @@ handle(int fd)
 	char line[2048], *path, *end, *query, *body = NULL;
 	long clen = 0, want_mtime = 0;
 	int is_put = 0, guarded = 0, method = 0, host = 0, cookie = 0;
-	enum { M_GET = 1, M_PUT, M_POST, M_DELETE };
+	enum { M_GET = 1, M_PUT, M_POST };
 	size_t got = 0;
 	struct timeval tv = { 15, 0 };
 
@@ -956,9 +843,6 @@ handle(int fd)
 	} else if (!strncmp(line, "POST ", 5)) {
 		method = M_POST;
 		path = line + 5;
-	} else if (!strncmp(line, "DELETE ", 7)) {
-		method = M_DELETE;
-		path = line + 7;
 	} else {
 		send_text(f, "405 Method Not Allowed", "text/plain", "unsupported", 11);
 		fclose(f);
@@ -1059,30 +943,6 @@ handle(int fd)
 		if (!strcmp(path, "/api/open") && query && !strncmp(query, "path=", 5)) {
 			url_decode(query + 5);
 			open_path(f, query + 5);
-			fclose(f);
-			return;
-		}
-		if (!strcmp(path, "/api/new") && query && !strncmp(query, "path=", 5)) {
-			char *amp = strchr(query, '&');
-			int as_dir = 0;
-
-			if (amp) {
-				*amp = '\0';
-				as_dir = !strcmp(amp + 1, "kind=dir");
-			}
-			url_decode(query + 5);
-			create_path(f, query + 5, as_dir);
-		} else {
-			send_text(f, "404 Not Found", "text/plain", "not found", 9);
-		}
-		fclose(f);
-		return;
-	}
-
-	if (method == M_DELETE) {
-		if (!strcmp(path, "/api/file") && query && !strncmp(query, "path=", 5)) {
-			url_decode(query + 5);
-			remove_path(f, query + 5);
 		} else {
 			send_text(f, "404 Not Found", "text/plain", "not found", 9);
 		}

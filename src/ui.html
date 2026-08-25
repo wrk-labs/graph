@@ -1265,8 +1265,7 @@ function hints() {
     list = [["k/j", "down/up"], ["h/l", "fold"], ["\u23ce", "open"]];
     if (x && x.type === "note") list.push(["e", "edit"]);
     if (x) list.push(["o", "open"]);
-    list.push(["/", "search"], [":new", "file"], [":mkdir", "dir"],
-              [":rm", "delete"], ["gg/G", "ends"]);
+    list.push(["/", "search"], [":!", "shell"], ["gg/G", "ends"]);
   }
   var el = $("#st-hints");
   if (!el) return;
@@ -1316,32 +1315,12 @@ var BROWSE = {g: false, cmd: null};
 
 /* Paths follow the same rule as references: rooted at the repository, with
  * `./` for something beside the file being looked at. */
-function resolveNew(arg) {
-  if (arg.indexOf("./") === 0) {
-    var here = cur >= 0
-      ? (N[cur].type === "dir" ? N[cur].path : parentOf(N[cur].path))
-      : "";
-    return here ? here + "/" + arg.slice(2) : arg.slice(2);
-  }
-  return arg;
-}
-
 function api(method, url) {
   return fetch(url, {method: method, headers: {"X-Graph-Write": "1"}})
     .then(checkLive)
     .then(function (r) {
       return r.text().then(function (t) { return {ok: r.ok, status: r.status, body: t}; });
     });
-}
-
-function afterChange(openPath, editIt) {
-  fetch("/api/graph").then(checkLive).then(function (r) { return r.json(); }).then(function (d) {
-    G = d;
-    build();
-    var j = openPath ? idx(openPath) : -1;
-    show(j >= 0 ? j : Math.max(0, idx("") >= 0 ? idx("") : 0));
-    if (editIt && j >= 0 && N[j].type === "note") edit(N[j]);
-  }).catch(offline);
 }
 
 /* Report where the command was typed, not in the dim corner: the message
@@ -1355,49 +1334,28 @@ function flash(msg, isError) {
   hints();
 }
 
+/* ":!" opens a shell tab on the repository. It takes no command: the tab is a
+ * place to work, not a way to run one line. The native window owns the shell —
+ * the server never runs anything, so a token that opens notes cannot open a
+ * shell — and in a browser there is nothing to ask. */
+function shell() {
+  var h = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.graph;
+  if (!h) return flash("the shell needs the Graph window", 1);
+  h.postMessage("sh:");
+}
+
 function runBrowseCmd(c) {
-  var m = c.slice(1).trim().match(/^(\S+)\s*(.*)$/);
+  var body = c.slice(1);
+  if (body.charAt(0) === "!") {
+    if (body.slice(1).trim()) return flash(":! opens the shell and takes no command", 1);
+    return shell();
+  }
+  var m = body.trim().match(/^(\S+)\s*(.*)$/);
   if (!m) return;
   var verb = m[1], arg = m[2].trim(), x = cur >= 0 ? N[cur] : null;
 
-  if (verb === "new" || verb === "e") {
-    if (!arg) return flash("usage: :new <path>", 1);
-    var path = resolveNew(arg);
-    if (!/\.[A-Za-z0-9]+$/.test(path)) path += ".md";
-    api("POST", "/api/new?path=" + encodeURIComponent(path)).then(function (r) {
-      if (!r.ok) return flash(r.body || ("failed (" + r.status + ")"), 1);
-      flash("created " + path);
-      afterChange(path, true);
-    }).catch(offline);
-    return;
-  }
-  if (verb === "mkdir") {
-    if (!arg) return flash("usage: :mkdir <path>", 1);
-    var dir = resolveNew(arg);
-    api("POST", "/api/new?path=" + encodeURIComponent(dir) + "&kind=dir").then(function (r) {
-      if (!r.ok) return flash(r.body || ("failed (" + r.status + ")"), 1);
-      flash("created " + dir + "/");
-      afterChange(dir, false);
-    }).catch(offline);
-    return;
-  }
-  if (verb === "rm" || verb === "rmdir") {
-    var target = arg ? resolveNew(arg) : (x ? x.path : "");
-    if (!target) return flash("nothing selected", 1);
-    var t = idx(target);
-    if (t < 0) return flash("no such path: " + target, 1);
-    var isDir = N[t].type === "dir";
-    if (verb === "rm" && isDir) return flash("use :rmdir for a directory", 1);
-    if (verb === "rmdir" && !isDir) return flash("use :rm for a file", 1);
-    if (!confirm("Delete " + target + "?")) return;
-    var up = parentOf(target);
-    api("DELETE", "/api/file?path=" + encodeURIComponent(target)).then(function (r) {
-      if (!r.ok) return flash(r.body || ("failed (" + r.status + ")"), 1);
-      flash("deleted " + target);
-      afterChange(up, false);
-    }).catch(offline);
-    return;
-  }
+  if (verb === "sh") return shell();
+
   flash("unknown command: " + verb, 1);
 }
 

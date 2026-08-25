@@ -100,6 +100,11 @@ jobs:
         env:
           MACOSX_DEPLOYMENT_TARGET: "12.0"
 
+      - name: sandbox policy test
+        # Drives the real Seatbelt profile the shell tab uses, under a
+        # throwaway HOME. Linux/Landlock is covered once confine() lands.
+        run: make test-sandbox
+
       - name: package tarball
         # Flat tarball (graph + Graph.app + LICENSE at root): what the cask
         # in Casks/ installs from.

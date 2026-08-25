@@ -1,0 +1,132 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>shell</title>
+<!-- @vendor -->
+<style>
+html, body { margin: 0; height: 100%; background: #0f1416; overflow: hidden; }
+body {
+  display: flex; flex-direction: column;
+  font-family: ui-monospace, "SF Mono", Menlo, "DejaVu Sans Mono", monospace;
+  color: #d6dee2;
+}
+#hdr {
+  flex: 0 0 auto; padding: 9px 14px 10px;
+  background: #141a1d; border-bottom: 1px solid #253137;
+  font-size: 12px; line-height: 1.4; user-select: none;
+}
+#hdr .top { display: flex; align-items: center; gap: 9px; }
+#hdr .name { font-size: 13px; font-weight: 600; color: #e7eaee; }
+#hdr .branch {
+  display: inline-flex; align-items: center; gap: 4px;
+  color: #7fb069; font-size: 11.5px;
+}
+#hdr .branch svg { opacity: .8; }
+#hdr .pill {
+  margin-left: auto; font-size: 10.5px; font-weight: 600;
+  padding: 2px 9px; border-radius: 999px; white-space: nowrap;
+  color: #86c06a; background: rgba(127,176,105,.13);
+  display: inline-flex; align-items: center; gap: 5px;
+}
+#hdr .pill.warn { color: #e3574f; background: rgba(227,87,79,.13); }
+#hdr .pill .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+#hdr .path {
+  color: #6b7075; font-size: 11px; margin-top: 3px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+#hdr .note { color: #767c86; font-size: 11px; margin-top: 5px; }
+/* The terminal is a rounded card floating in the window, inset on all sides.
+ * The margin lives on #twrap and the inner inset on #card — never on #t:
+ * FitAddon measures #t's height, so any padding there would make it size the
+ * terminal too tall and crop the bottom rows. #t stays padding-free. */
+#twrap { flex: 1 1 auto; min-height: 0; display: flex; padding: 10px; box-sizing: border-box; }
+#card {
+  flex: 1 1 auto; min-height: 0; display: flex; padding: 7px;
+  background: #141a1d; border: 1px solid #253137; border-radius: 9px;
+  overflow: hidden; box-sizing: border-box;
+}
+#t { flex: 1 1 auto; min-height: 0; min-width: 0; }
+</style>
+</head>
+<body>
+<div id="hdr"><div class="top"><span class="name">shell</span></div></div>
+<div id="twrap"><div id="card"><div id="t"></div></div></div>
+<script>
+/* The shell tab. xterm.js draws; the native shell owns the pty and speaks
+ * to this page through window.webkit.messageHandlers.term, the one bridge
+ * WKWebView and WebKitGTK both provide. Messages are plain strings:
+ *
+ *   to native   "rs:<cols>x<rows>"   the size; the first one starts the shell
+ *               "in:<text>"          keys typed
+ *   from native T.recv(<base64>)     bytes the shell wrote
+ *               T.fail()             the shell could not be started
+ *               T.info(<obj>)        repo + sandbox facts for the header
+ */
+function esc(s) {
+  return String(s).replace(/[&<>"]/g, function (c) {
+    return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
+  });
+}
+
+var BRANCH_ICON =
+  '<svg width="11" height="11" viewBox="0 0 16 16" fill="none" ' +
+  'stroke="currentColor" stroke-width="1.5" stroke-linecap="round">' +
+  '<circle cx="4.5" cy="3.5" r="1.7"/><circle cx="4.5" cy="12.5" r="1.7"/>' +
+  '<circle cx="11.5" cy="5" r="1.7"/>' +
+  '<path d="M4.5 5.2v5.6M11.5 6.7c0 2.4-2 3.2-4.4 3.6"/></svg>';
+
+var term = new Terminal({
+  cursorBlink: true,
+  fontFamily: 'ui-monospace, "SF Mono", Menlo, "DejaVu Sans Mono", monospace',
+  fontSize: 13,
+  scrollback: 5000,
+  theme: { background: "#141a1d", foreground: "#d6dee2", cursor: "#d6dee2" }
+});
+var fit = new FitAddon.FitAddon();
+term.loadAddon(fit);
+term.open(document.getElementById("t"));
+
+var H = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.term;
+function send(s) { if (H) H.postMessage(s); }
+
+term.onData(function (d) { send("in:" + d); });
+function resize() { fit.fit(); send("rs:" + term.cols + "x" + term.rows); }
+window.addEventListener("resize", resize);
+
+window.T = {
+  recv: function (b64) {
+    var s = atob(b64), a = new Uint8Array(s.length);
+    for (var i = 0; i < s.length; i++) a[i] = s.charCodeAt(i);
+    term.write(a);
+  },
+  fail: function () { term.write("\r\ncould not start the shell\r\n"); },
+  /* Native fills the header once the repo and sandbox are known. */
+  info: function (o) {
+    var branch = o.branch
+      ? '<span class="branch">' + BRANCH_ICON + esc(o.branch) + "</span>" : "";
+    var pill = o.sandboxed
+      ? '<span class="pill"><span class="dot"></span>sandboxed</span>'
+      : '<span class="pill warn"><span class="dot"></span>unsandboxed</span>';
+    var note = o.sandboxed
+      ? "Repository-scoped — other files are accessible as read-only."
+      : "Not scoped — commands have your full access to the machine.";
+    document.getElementById("hdr").innerHTML =
+      '<div class="top">' +
+        '<span class="name">' + esc(o.name || "shell") + "</span>" +
+        branch + pill +
+      "</div>" +
+      (o.path ? '<div class="path">' + esc(o.path) + "</div>" : "") +
+      '<div class="note">' + esc(note) + "</div>";
+    /* Refit only once the new header height has been laid out, or the
+     * terminal is sized to the old height and its bottom rows get cropped. */
+    requestAnimationFrame(function () { requestAnimationFrame(resize); });
+  }
+};
+
+if (!H) term.write("the shell needs the Graph window\r\n");
+resize();
+term.focus();
+</script>
+</body>
+</html>

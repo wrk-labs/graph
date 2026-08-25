@@ -58,9 +58,14 @@ src/templates.h: $(TEMPLATES) tools/templates.sh tools/embed.sh
 $(BIN): $(OBJ)
 	$(CC) -o $@ $(OBJ) $(LDFLAGS)
 
+# The shell tab's page: term.html with xterm.js inlined, embedded like ui.html.
+shell/term.h: shell/term.html vendor/xterm/xterm.js vendor/xterm/xterm.css \
+              vendor/xterm/addon-fit.js tools/term.sh tools/embed.sh
+	sh tools/term.sh > $@
+
 # The bundle carries its own copy of graph so it can live in /Applications on
 # its own: double-clicking asks for a repository and runs `graph display`.
-Graph.app: $(BIN) shell/mac.m shell/Info.plist shell/icon.svg tools/icns.sh
+Graph.app: $(BIN) shell/mac.m shell/term.h shell/Info.plist shell/icon.svg tools/icns.sh
 	rm -rf $@
 	mkdir -p $@/Contents/MacOS $@/Contents/Resources
 	$(CC) -fobjc-arc -Wall -Wextra -Os -framework Cocoa -framework WebKit \
@@ -69,12 +74,14 @@ Graph.app: $(BIN) shell/mac.m shell/Info.plist shell/icon.svg tools/icns.sh
 	sed 's|__VERSION__|$(VERSION)|g' shell/Info.plist > $@/Contents/Info.plist
 	sh tools/icns.sh shell/icon.svg $@/Contents/Resources/graph.icns
 
-graph-shell: shell/linux.c
+# -lutil for forkpty; part of libc since glibc 2.34, still its own library on
+# the oldest glibc the package targets.
+graph-shell: shell/linux.c shell/term.h
 	$(CC) -Wall -Wextra -Os -o $@ shell/linux.c \
-	    $(shell pkg-config --cflags --libs gtk+-3.0 $(WEBKIT))
+	    $(shell pkg-config --cflags --libs gtk+-3.0 $(WEBKIT)) -lutil
 
 clean:
-	rm -rf $(BIN) $(OBJ) src/ui.h src/templates.h Graph.app graph-shell
+	rm -rf $(BIN) $(OBJ) src/ui.h src/templates.h shell/term.h Graph.app graph-shell
 
 # --- tests ---
 # The suite reconfigures Samba and must not touch a real machine, so it only
@@ -85,6 +92,12 @@ clean:
 test:
 	docker build -q -f Dockerfile.test -t graph-test .
 	docker run --rm --privileged -v "$$PWD:/src:ro" -w /src graph-test
+
+# The sandbox test drives the real per-platform confinement (Seatbelt on
+# macOS, Landlock on Linux), so it runs natively rather than in the container.
+# It needs the shell built.
+test-sandbox: $(SHELL_BIN)
+	sh test/sandbox_test.sh
 
 install: all
 	mkdir -p $(DESTDIR)$(PREFIX)/bin
@@ -139,4 +152,4 @@ endif
 	@echo
 	@echo "  built $(DEB_FILE)"
 
-.PHONY: all clean install uninstall deb test
+.PHONY: all clean install uninstall deb test test-sandbox
