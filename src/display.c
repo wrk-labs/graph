@@ -2,7 +2,7 @@
 /* graph display — serve a local, read-only view of a repository
  *
  * Experimental. The repository stays the source of truth: this walks the tree
- * on every request, holds no index, and never writes. */
+ * on every request and keeps nothing between requests. */
 
 #include <arpa/inet.h>
 #include <dirent.h>
@@ -30,8 +30,6 @@
 #include "graph.h"
 #include "ui.h"
 
-#define MAX_NODES 4096
-#define MAX_EDGES 8192
 #define MAX_BODY  (1 << 20)
 
 enum { T_DIR, T_NOTE, T_FILE, T_MISSING };
@@ -40,6 +38,9 @@ struct node {
 	char path[512];		/* repository-relative; "" is the root */
 	char name[256];
 	int type;
+	int lazy;		/* an ignored directory: shown, never entered */
+	int noscan;		/* an ignored file: listed, never read for
+				 * links or search */
 	long size;		/* bytes; 0 for directories and missing */
 	long mtime;		/* epoch seconds; 0 when unknown */
 };
@@ -50,12 +51,24 @@ struct edge {
 	char raw[256];
 };
 
-static struct node nodes[MAX_NODES];
-static struct edge edges[MAX_EDGES];
+/* The arrays grow to whatever the repository holds — there is no node or
+ * edge cap to hit. What bounds the tree in practice is .graphignore: the
+ * scan does not enter ignored directories, so a dependency tree costs one
+ * node however large it is. */
+static struct node *nodes;
+static struct edge *edges;
 static int nnodes, nedges;
+static int cap_nodes, cap_edges;
+static int *hash;		/* path -> node index, -1 when empty */
+static int hash_cap;		/* slots; kept at twice cap_nodes */
 static char repo_root[PATH_MAX];
 static char token[33];		/* per-run secret; requests must carry it */
 static int srv_port;
+
+/* Directory names and paths from .graphignore. */
+#define MAX_IGNORE 128
+static char ignore_pat[MAX_IGNORE][256];
+static int nignore;
 
 static const char *
 type_name(int t)
@@ -68,15 +81,56 @@ type_name(int t)
 	}
 }
 
+static void *
+xrealloc(void *p, size_t n)
+{
+	if (!(p = realloc(p, n)))
+		die("out of memory");
+	return p;
+}
+
+/* The scan looks every path up once and the link pass once more per target,
+ * which against a linear search turns the whole build quadratic — seconds per
+ * request on a large tree. A hash over the paths keeps it flat. FNV-1a; the
+ * table holds twice the node capacity, so it never fills past half and
+ * probes stay short. */
+static unsigned
+hash_path(const char *s)
+{
+	unsigned h = 2166136261u;
+
+	for (; *s; s++) {
+		h ^= (unsigned char)*s;
+		h *= 16777619u;
+	}
+	return h;
+}
+
 static int
 find_node(const char *path)
 {
+	unsigned s;
 	int i;
 
-	for (i = 0; i < nnodes; i++)
+	if (!hash_cap)
+		return -1;
+	s = hash_path(path) % (unsigned)hash_cap;
+	while ((i = hash[s]) >= 0) {
 		if (!strcmp(nodes[i].path, path))
 			return i;
+		s = (s + 1) % (unsigned)hash_cap;
+	}
 	return -1;
+}
+
+static void
+hash_insert(int i)
+{
+	unsigned s = hash_path(nodes[i].path) % (unsigned)hash_cap;
+
+	while (hash[s] >= 0)
+		s = (s + 1) % (unsigned)hash_cap;
+	hash[s] = i;
 }
 
 static int
@@ -86,14 +140,24 @@ add_node(const char *path, const char *name, int type)
 
 	if ((i = find_node(path)) >= 0)
 		return i;
-	if (nnodes >= MAX_NODES)
-		return -1;
+	if (nnodes == cap_nodes) {
+		cap_nodes = cap_nodes ? cap_nodes * 2 : 1024;
+		nodes = xrealloc(nodes, (size_t)cap_nodes * sizeof(*nodes));
+		hash_cap = cap_nodes * 2;
+		hash = xrealloc(hash, (size_t)hash_cap * sizeof(*hash));
+		memset(hash, -1, (size_t)hash_cap * sizeof(*hash));
+		for (i = 0; i < nnodes; i++)
+			hash_insert(i);
+	}
 	i = nnodes++;
 	snprintf(nodes[i].path, sizeof(nodes[i].path), "%s", path);
 	snprintf(nodes[i].name, sizeof(nodes[i].name), "%s", name);
 	nodes[i].type = type;
+	nodes[i].lazy = 0;
+	nodes[i].noscan = 0;
 	nodes[i].size = 0;
 	nodes[i].mtime = 0;
+	hash_insert(i);
 	return i;
 }
 
@@ -105,8 +169,70 @@ has_suffix(const char *s, const char *suf)
 	return ls >= lf && !strcmp(s + ls - lf, suf);
 }
 
+/* ---- ignores ----
+ *
+ * .graphignore at the repository root names what is shown but not read. A
+ * matched directory is added and never entered — a dependency tree costs
+ * one node however large it is, its contents reachable through the lazy
+ * rules further down, listed level by level as the UI opens it. A matched
+ * file stays in the tree, readable and editable, but is never opened for
+ * [[links]] and never answers a search.
+ *
+ * One pattern per line; blank lines and # comments are skipped. A bare name
+ * matches that name anywhere in the tree; a pattern with a slash matches
+ * one repository-relative path, a leading slash anchoring a root-level name
+ * (/README.md) that a bare name could only mean everywhere; a leading *
+ * matches by name suffix, which is the form a file usually wants
+ * (*.gen.md). */
+
+static void
+load_ignores(void)
+{
+	char abs[PATH_MAX], line[512];
+	FILE *f;
+	size_t n;
+	char *p;
+
+	nignore = 0;
+	if (join_path(abs, sizeof(abs), repo_root, ".graphignore") < 0)
+		return;
+	if (!(f = fopen(abs, "r")))
+		return;
+	while (nignore < MAX_IGNORE && fgets(line, sizeof(line), f)) {
+		p = line;
+		while (*p == ' ' || *p == '\t')
+			p++;
+		n = strcspn(p, "\r\n");
+		p[n] = '\0';
+		while (n && (p[n - 1] == ' ' || p[n - 1] == '\t' || p[n - 1] == '/'))
+			p[--n] = '\0';
+		if (!n || *p == '#' || n >= sizeof(ignore_pat[0]))
+			continue;
+		memcpy(ignore_pat[nignore++], p, n + 1);
+	}
+	fclose(f);
+}
+
+static int
+ignored_name(const char *rel, const char *name)
+{
+	const char *p;
+	int i;
+
+	for (i = 0; i < nignore; i++) {
+		p = ignore_pat[i];
+		if (p[0] == '/' ? !strcmp(rel, p + 1) :
+		    strchr(p, '/') ? !strcmp(rel, p) :
+		    p[0] == '*' ? has_suffix(name, p + 1) :
+		    !strcmp(name, p))
+			return 1;
+	}
+	return 0;
+}
+
 /* Walk the tree, adding a node per directory and file. Dotfiles are skipped:
- * .graph is Graph's own business, and the rest is editor and OS litter. */
+ * .graph is Graph's own business, and the rest is editor and OS litter. An
+ * ignored directory is added and left shut. */
 static void
 scan(const char *abs, const char *rel)
 {
@@ -147,15 +273,18 @@ scan(const char *abs, const char *rel)
 				continue;
 		}
 		if (S_ISDIR(st.st_mode)) {
-			add_node(child_rel, e->d_name, T_DIR);
-			scan(child_abs, child_rel);
+			int ni = add_node(child_rel, e->d_name, T_DIR);
+
+			if (ignored_name(child_rel, e->d_name))
+				nodes[ni].lazy = 1;
+			else
+				scan(child_abs, child_rel);
 		} else if (S_ISREG(st.st_mode)) {
 			int ni = add_node(child_rel, e->d_name,
 			    has_suffix(e->d_name, ".md") ? T_NOTE : T_FILE);
-			if (ni >= 0) {
-				nodes[ni].size = (long)st.st_size;
-				nodes[ni].mtime = (long)st.st_mtime;
-			}
+			nodes[ni].noscan = ignored_name(child_rel, e->d_name);
+			nodes[ni].size = (long)st.st_size;
+			nodes[ni].mtime = (long)st.st_mtime;
 		}
 	}
 	closedir(d);
@@ -228,7 +357,7 @@ extract_links(int from)
 	char abs[PATH_MAX], dir[512], target[256];
 	char *src, *p, *q, *bar;
 	size_t len, n;
-	int to, mi, fenced = 0, ticks = 0;
+	int to, fenced = 0, ticks = 0;
 
 	if (join_path(abs, sizeof(abs), repo_root, nodes[from].path) < 0)
 		return;
@@ -273,17 +402,16 @@ extract_links(int from)
 		if (!*target)
 			continue;
 
-		if (nedges >= MAX_EDGES)
-			break;
 		to = resolve(target, dir);
 		if (to < 0) {
 			/* Surface the gap rather than dropping the link. An
 			 * unresolved link is not an error, but it is worth
 			 * seeing. */
-			mi = add_node(target, target, T_MISSING);
-			if (mi < 0)
-				continue;
-			to = mi;
+			to = add_node(target, target, T_MISSING);
+		}
+		if (nedges == cap_edges) {
+			cap_edges = cap_edges ? cap_edges * 2 : 1024;
+			edges = xrealloc(edges, (size_t)cap_edges * sizeof(*edges));
 		}
 		edges[nedges].s = from;
 		edges[nedges].t = to;
@@ -300,11 +428,14 @@ build(void)
 	int i, n;
 
 	nnodes = nedges = 0;
+	if (hash)
+		memset(hash, -1, (size_t)hash_cap * sizeof(*hash));
+	load_ignores();
 	add_node("", "", T_DIR);
 	scan(repo_root, "");
 	n = nnodes;			/* missing nodes get appended below */
 	for (i = 0; i < n; i++)
-		if (nodes[i].type == T_NOTE)
+		if (nodes[i].type == T_NOTE && !nodes[i].noscan)
 			extract_links(i);
 }
 
@@ -366,6 +497,30 @@ send_text(FILE *f, const char *status, const char *type, const char *body, size_
 	fwrite(body, 1, len, f);
 }
 
+/* What /api/open will hand to the desktop, by extension. The list rides in
+ * /api/graph too, so the page can withhold the open affordance from a file a
+ * request would only be refused for. (The executable-bit refusal stays
+ * server-side; a mode bit is not in the tree the page sees.) */
+static const char *const viewer_exts[] = {
+	/* images */
+	".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif",
+	".tiff", ".heic", ".heif", ".avif", ".ico",
+	/* documents */
+	".pdf", ".txt", ".text", ".md", ".markdown", ".rtf", ".csv",
+	".tsv", ".log", ".json", ".xml", ".yaml", ".yml",
+	/* office / iWork */
+	".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".odt",
+	".ods", ".odp", ".pages", ".numbers", ".key",
+	/* audio */
+	".mp3", ".wav", ".flac", ".aac", ".m4a", ".ogg", ".oga",
+	".opus", ".aiff",
+	/* video */
+	".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi", ".mpg",
+	".mpeg",
+	/* ebook */
+	".epub", NULL
+};
+
 static void
 send_graph(FILE *f)
 {
@@ -378,7 +533,13 @@ send_graph(FILE *f)
 		return;
 	fputs("{\"root\":", m);
 	json_str(m, repo_root);
-	fputs(",\"nodes\":[", m);
+	fputs(",\"viewer\":[", m);
+	for (i = 0; viewer_exts[i]; i++) {
+		if (i)
+			fputc(',', m);
+		json_str(m, viewer_exts[i]);
+	}
+	fputs("],\"nodes\":[", m);
 	for (i = 0; i < nnodes; i++) {
 		if (i)
 			fputc(',', m);
@@ -386,8 +547,9 @@ send_graph(FILE *f)
 		json_str(m, nodes[i].path);
 		fputs(",\"name\":", m);
 		json_str(m, nodes[i].name);
-		fprintf(m, ",\"type\":\"%s\",\"size\":%ld,\"mtime\":%ld}",
-		    type_name(nodes[i].type), nodes[i].size, nodes[i].mtime);
+		fprintf(m, ",\"type\":\"%s\",\"size\":%ld,\"mtime\":%ld%s}",
+		    type_name(nodes[i].type), nodes[i].size, nodes[i].mtime,
+		    nodes[i].lazy ? ",\"lazy\":true" : "");
 	}
 	fputs("],\"edges\":[", m);
 	for (i = 0; i < nedges; i++) {
@@ -428,7 +590,7 @@ send_search(FILE *f, const char *q)
 	fputs("{\"hits\":[", o);
 
 	for (node = 0; node < nnodes && hits < 200; node++) {
-		if (nodes[node].type != T_NOTE)
+		if (nodes[node].type != T_NOTE || nodes[node].noscan)
 			continue;
 		if (join_path(abs, sizeof(abs), repo_root, nodes[node].path) < 0)
 			continue;
@@ -495,28 +657,161 @@ url_decode(char *s)
 	*o = '\0';
 }
 
-/* Only paths that turned up in the scan are readable, which rules out
- * traversal without any string surgery. */
+/* ---- lazy paths ----
+ *
+ * The scan is the gate for reads and writes: a path it found is served, and
+ * anything else is turned away, which rules out traversal without any string
+ * surgery. Ignored directories put a second door in that wall — their
+ * contents are real and shown, but never scanned. A lazy path is admitted
+ * when it is spelled plainly — no empty, dot or dot-dot parts, the same
+ * censure the scan applies — and its nearest scanned ancestor is an ignored
+ * directory, so the only unscanned ground it crosses is ground the scan
+ * chose not to enter. */
+static int
+lazy_ok(const char *rel)
+{
+	char buf[512];
+	const char *p, *q;
+	char *slash;
+	int i;
+
+	if (strlen(rel) >= sizeof(buf))
+		return 0;
+	for (p = rel; *p; p = *q ? q + 1 : q) {
+		if (!(q = strchr(p, '/')))
+			q = p + strlen(p);
+		if (q == p || p[0] == '.')
+			return 0;
+	}
+	snprintf(buf, sizeof(buf), "%s", rel);
+	while ((slash = strrchr(buf, '/'))) {
+		*slash = '\0';
+		if ((i = find_node(buf)) >= 0)
+			return nodes[i].type == T_DIR && nodes[i].lazy;
+	}
+	return 0;
+}
+
+/* Resolve a lazy path to its absolute name, refusing one that leaves the
+ * repository through a symlink. The scan vets its own entries link by link;
+ * this is the same rule for the road it never walked. */
+static int
+lazy_abs(const char *rel, char *abs, size_t n)
+{
+	char real[PATH_MAX];
+	size_t rl = strlen(repo_root);
+
+	if (join_path(abs, n, repo_root, rel) < 0)
+		return -1;
+	if (!realpath(abs, real) || strncmp(real, repo_root, rl) ||
+	    (real[rl] && real[rl] != '/'))
+		return -1;
+	return 0;
+}
+
+/* Where every file read and write starts: the path is admitted when the scan
+ * found it as a file, or when the lazy rules accept it and it names a regular
+ * file. Fills abs and returns 0; directories and everything else are -1. */
+static int
+readable_abs(const char *rel, char *abs, size_t n)
+{
+	struct stat st;
+	int i;
+
+	if ((i = find_node(rel)) >= 0) {
+		if (nodes[i].type == T_DIR || nodes[i].type == T_MISSING)
+			return -1;
+		return join_path(abs, n, repo_root, rel);
+	}
+	if (!lazy_ok(rel) || lazy_abs(rel, abs, n) < 0)
+		return -1;
+	if (stat(abs, &st) < 0 || !S_ISREG(st.st_mode))
+		return -1;
+	return 0;
+}
+
 static void
 send_file(FILE *f, const char *rel)
 {
 	char abs[PATH_MAX];
 	char *body;
 	size_t len;
-	int i;
 
-	i = find_node(rel);
-	if (i < 0 || nodes[i].type == T_DIR || nodes[i].type == T_MISSING) {
-		send_text(f, "404 Not Found", "text/plain", "not found", 9);
-		return;
-	}
-	if (join_path(abs, sizeof(abs), repo_root, rel) < 0 ||
+	if (readable_abs(rel, abs, sizeof(abs)) < 0 ||
 	    !(body = slurp(abs, &len))) {
 		send_text(f, "404 Not Found", "text/plain", "not found", 9);
 		return;
 	}
 	send_text(f, "200 OK", "text/plain; charset=utf-8", body, len);
 	free(body);
+}
+
+/* One level of an ignored directory, listed on demand. The same shape the
+ * scan produces, without joining the index: the UI grafts the entries onto
+ * the tree it already shows, and asks again a level further down. */
+static void
+send_ls(FILE *f, const char *rel)
+{
+	char abs[PATH_MAX], child[PATH_MAX];
+	DIR *d;
+	struct dirent *e;
+	struct stat st;
+	FILE *o;
+	char *json;
+	size_t jlen;
+	int i, ok, first = 1;
+
+	if ((i = find_node(rel)) >= 0)
+		ok = nodes[i].type == T_DIR && nodes[i].lazy;
+	else
+		ok = lazy_ok(rel);
+	if (!ok || lazy_abs(rel, abs, sizeof(abs)) < 0 || !(d = opendir(abs))) {
+		send_text(f, "404 Not Found", "text/plain", "not found", 9);
+		return;
+	}
+	if (!(o = open_memstream(&json, &jlen))) {
+		closedir(d);
+		return;
+	}
+	fputs("{\"entries\":[", o);
+	while ((e = readdir(d))) {
+		if (e->d_name[0] == '.')
+			continue;
+		if (join_path(child, sizeof(child), abs, e->d_name) < 0)
+			continue;
+		if (lstat(child, &st) < 0)
+			continue;
+		if (S_ISLNK(st.st_mode)) {
+			/* same rule as the scan: a link out of the tree is
+			 * not shown, so it cannot be followed */
+			char real[PATH_MAX];
+			size_t rl = strlen(repo_root);
+
+			if (!realpath(child, real) ||
+			    strncmp(real, repo_root, rl) ||
+			    (real[rl] && real[rl] != '/'))
+				continue;
+			if (stat(child, &st) < 0)
+				continue;
+		}
+		if (!S_ISDIR(st.st_mode) && !S_ISREG(st.st_mode))
+			continue;
+		if (!first)
+			fputc(',', o);
+		first = 0;
+		fputs("{\"name\":", o);
+		json_str(o, e->d_name);
+		fprintf(o, ",\"type\":\"%s\",\"size\":%ld,\"mtime\":%ld}",
+		    S_ISDIR(st.st_mode) ? "dir" :
+		    has_suffix(e->d_name, ".md") ? "note" : "file",
+		    S_ISDIR(st.st_mode) ? 0L : (long)st.st_size,
+		    (long)st.st_mtime);
+	}
+	closedir(d);
+	fputs("]}", o);
+	fclose(o);
+	send_text(f, "200 OK", "application/json", json, jlen);
+	free(json);
 }
 
 /* Write a note back to disk.
@@ -536,15 +831,9 @@ write_file(FILE *f, const char *rel, long expect_mtime, const char *body, size_t
 	char abs[PATH_MAX], tmp[PATH_MAX];
 	struct stat st;
 	FILE *o;
-	int i;
 
-	i = find_node(rel);
-	if (i < 0 || (nodes[i].type != T_NOTE && nodes[i].type != T_FILE)) {
+	if (readable_abs(rel, abs, sizeof(abs)) < 0) {
 		send_text(f, "404 Not Found", "text/plain", "not found", 9);
-		return;
-	}
-	if (join_path(abs, sizeof(abs), repo_root, rel) < 0) {
-		send_text(f, "400 Bad Request", "text/plain", "bad path", 8);
 		return;
 	}
 	if (stat(abs, &st) < 0) {
@@ -612,14 +901,8 @@ send_raw(FILE *f, const char *rel)
 	char abs[PATH_MAX];
 	char *body;
 	size_t len;
-	int i;
 
-	i = find_node(rel);
-	if (i < 0 || nodes[i].type == T_DIR || nodes[i].type == T_MISSING) {
-		send_text(f, "404 Not Found", "text/plain", "not found", 9);
-		return;
-	}
-	if (join_path(abs, sizeof(abs), repo_root, rel) < 0 ||
+	if (readable_abs(rel, abs, sizeof(abs)) < 0 ||
 	    !(body = slurp(abs, &len))) {
 		send_text(f, "404 Not Found", "text/plain", "not found", 9);
 		return;
@@ -645,32 +928,13 @@ send_raw(FILE *f, const char *rel)
 static int
 viewer_ext(const char *name)
 {
-	static const char *const ok[] = {
-		/* images */
-		".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif",
-		".tiff", ".heic", ".heif", ".avif", ".ico",
-		/* documents */
-		".pdf", ".txt", ".text", ".md", ".markdown", ".rtf", ".csv",
-		".tsv", ".log", ".json", ".xml", ".yaml", ".yml",
-		/* office / iWork */
-		".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".odt",
-		".ods", ".odp", ".pages", ".numbers", ".key",
-		/* audio */
-		".mp3", ".wav", ".flac", ".aac", ".m4a", ".ogg", ".oga",
-		".opus", ".aiff",
-		/* video */
-		".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi", ".mpg",
-		".mpeg",
-		/* ebook */
-		".epub", NULL
-	};
 	const char *d = strrchr(name, '.');
 	int i;
 
 	if (!d)
 		return 0;
-	for (i = 0; ok[i]; i++)
-		if (!strcasecmp(d, ok[i]))
+	for (i = 0; viewer_exts[i]; i++)
+		if (!strcasecmp(d, viewer_exts[i]))
 			return 1;
 	return 0;
 }
@@ -681,20 +945,30 @@ open_path(FILE *f, const char *rel)
 	char abs[PATH_MAX];
 	struct stat st;
 	pid_t pid;
-	int i;
+	int i, isdir;
 
-	i = find_node(rel);
-	if (i < 0 || nodes[i].type == T_MISSING) {
-		send_text(f, "404 Not Found", "text/plain", "not found", 9);
-		return;
+	if ((i = find_node(rel)) >= 0) {
+		if (nodes[i].type == T_MISSING ||
+		    join_path(abs, sizeof(abs), repo_root, rel) < 0 ||
+		    stat(abs, &st) < 0) {
+			send_text(f, "404 Not Found", "text/plain", "not found", 9);
+			return;
+		}
+		isdir = nodes[i].type == T_DIR;
+	} else {
+		if (!lazy_ok(rel) || lazy_abs(rel, abs, sizeof(abs)) < 0 ||
+		    stat(abs, &st) < 0) {
+			send_text(f, "404 Not Found", "text/plain", "not found", 9);
+			return;
+		}
+		isdir = S_ISDIR(st.st_mode);
 	}
-	if (join_path(abs, sizeof(abs), repo_root, rel) < 0 || stat(abs, &st) < 0) {
-		send_text(f, "404 Not Found", "text/plain", "not found", 9);
-		return;
-	}
-	if (nodes[i].type != T_DIR &&
+	if (!isdir &&
 	    ((st.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) || !viewer_ext(rel))) {
-		send_text(f, "403 Forbidden", "text/plain",
+		/* Not 403: in this app 401 and 403 mean the token, and the page
+		 * answers them with the signed-out sheet. This is a healthy
+		 * server declining the file type, which is the file's fault. */
+		send_text(f, "415 Unsupported Media Type", "text/plain",
 		    "will not open this file type", 28);
 		return;
 	}
@@ -1000,6 +1274,13 @@ handle(int fd)
 			send_search(f, query + 2);
 		} else {
 			send_text(f, "400 Bad Request", "text/plain", "no query", 8);
+		}
+	} else if (!strcmp(path, "/api/ls")) {
+		if (query && !strncmp(query, "path=", 5)) {
+			url_decode(query + 5);
+			send_ls(f, query + 5);
+		} else {
+			send_text(f, "400 Bad Request", "text/plain", "no path", 7);
 		}
 	} else if (!strcmp(path, "/api/raw")) {
 		if (query && !strncmp(query, "path=", 5)) {

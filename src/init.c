@@ -48,6 +48,59 @@ write_templates(const char *root)
 	}
 }
 
+/* A .graphignore to start from. Directories listed in it still show in the
+ * display tree and their contents stay reachable — listed level by level as
+ * they are opened — but nothing inside one is indexed, scanned for [[links]]
+ * or searched, so a dependency tree costs one node however large it is.
+ * Like the templates, the file is the user's from then on: init writes it
+ * once and nothing refills it. */
+static void
+write_ignore(const char *root)
+{
+	static const char defaults[] =
+	    "# What Graph shows but does not read. An ignored directory stays\n"
+	    "# visible and navigable, listed as it is opened, but nothing inside\n"
+	    "# it is scanned for [[links]] or searched. An ignored file stays in\n"
+	    "# the tree, readable and editable, but is not scanned or searched.\n"
+	    "#\n"
+	    "# One pattern per line. A bare name matches that name anywhere in\n"
+	    "# the tree; a pattern with / matches one path from the repository\n"
+	    "# root, a leading / anchoring a root-level file; *.ext matches by\n"
+	    "# name suffix.\n"
+	    "node_modules\n"
+	    "vendor\n"
+	    "target\n"
+	    "dist\n"
+	    "build\n"
+	    "__pycache__\n"
+	    "venv\n"
+	    "\n"
+	    "# The starter documents init wrote: layout guidance, not knowledge.\n"
+	    "# Remove a line once you have made the file your own and want it in\n"
+	    "# the graph.\n"
+	    "/AGENTS.md\n"
+	    "/README.md\n"
+	    "inbox/README.md\n"
+	    "people/README.md\n"
+	    "organizations/README.md\n"
+	    "finance/README.md\n"
+	    "research/README.md\n"
+	    "knowledge/README.md\n"
+	    "archive/README.md\n"
+	    "journal/README.md\n"
+	    "journal/agents/README.md\n";
+	char path[PATH_MAX];
+	FILE *f;
+
+	if (join_path(path, sizeof(path), root, ".graphignore") < 0)
+		die("path too long: %s/.graphignore", root);
+	if (!(f = fopen(path, "w")))
+		die("cannot write %s: %s", path, strerror(errno));
+	if (fwrite(defaults, 1, sizeof(defaults) - 1, f) != sizeof(defaults) - 1 ||
+	    fclose(f) != 0)
+		die("cannot write %s: %s", path, strerror(errno));
+}
+
 static void
 write_marker(const char *root)
 {
@@ -107,6 +160,7 @@ cmd_init(int argc, char *argv[])
 	}
 
 	write_templates(root);
+	write_ignore(root);
 	write_marker(root);
 
 	printf("created Graph repository at %s\n", root);

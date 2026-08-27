@@ -89,6 +89,19 @@ Rearrange it however suits you. Nest projects under an organization, scope
 research to a client, create your own directories. Graph looks for its marker in
 `.graph/` and leaves the rest of the tree to you.
 
+`init` also writes a `.graphignore` at the root, naming what Graph shows but
+does not read. An ignored directory — `node_modules`, `vendor` and the like —
+stays visible and navigable in the display, listed level by level as you open
+it, but nothing inside one is scanned for links or searched, so keeping whole
+code checkouts in the repository costs nothing. An ignored file stays in the
+tree, readable and editable, but is never scanned for links or searched —
+the starter documents init writes are listed this way, so their example
+links stay out of the graph until you make the files your own. One pattern
+per line: a bare name matches that name anywhere, a pattern with `/` matches
+one path from the root (a leading `/` anchors a root-level file), and `*.ext`
+matches by suffix. The file is yours to edit, and changes apply on the next
+request.
+
 ## Linking
 
 Markdown files can point at each other by path:

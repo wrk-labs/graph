@@ -236,6 +236,9 @@ table.ls td.nm .fx { color: var(--ghost); }
 .prose a.ext:hover { border-bottom-color: var(--d-people); }
 .prose a.ext::after { content: " ↗"; color: var(--faint); font-size: 11px; }
 .prose .md-img { color: var(--muted); font-style: italic; }
+/* badges and logos out of inline HTML: in a row, not one per line */
+.prose img.html-img { display: inline-block; vertical-align: middle; margin: 2px 3px; max-width: 100%; }
+.prose a.html-a { text-decoration: none; }
 .prose li.task { list-style: none; margin-left: -18px; }
 .prose li.task .box {
   display: inline-block; width: 11px; height: 11px; margin-right: 8px;
@@ -478,6 +481,12 @@ function esc(s) {
 /* Only schemes that name a place to go. javascript:, data:, file: and the
  * like are text, not links — a note must not run code or open programs. */
 function safeHref(u) { return /^(https?|mailto):/i.test(u); }
+/* One attribute out of a raw (unescaped) HTML tag body. */
+function attrOf(tag, name) {
+  var m = tag.match(new RegExp(name + "\\s*=\\s*(\"([^\"]*)\"|'([^']*)'|([^\\s>]+))", "i"));
+  if (!m) return "";
+  return m[2] !== undefined ? m[2] : m[3] !== undefined ? m[3] : m[4];
+}
 /* inline() escapes first and matches after, so a path picked out of the
  * escaped text is undone before it names a file */
 function unesc(s) {
@@ -507,6 +516,17 @@ function fname(n) {
   return esc(n.slice(0, d)) + "<span class='fx'>" + esc(n.slice(d)) + "</span>";
 }
 
+/* Whether `o` has any chance: directories go to the file manager, files only
+ * when their extension is on the server's viewer list, which /api/graph
+ * carries so the two ends cannot drift apart. The server still has the last
+ * word — the executable-bit refusal lives there alone. */
+function openable(x) {
+  if (!x || x.type === "missing") return false;
+  if (x.type === "dir") return true;
+  var d = x.name.lastIndexOf(".");
+  return d > 0 && (G.viewer || []).indexOf(x.name.slice(d).toLowerCase()) >= 0;
+}
+
 function parentOf(p) { var i = p.lastIndexOf("/"); return i < 0 ? "" : p.slice(0, i); }
 function idx(path) { for (var i = 0; i < N.length; i++) if (N[i].path === path) return i; return -1; }
 function domOf(p) { var t = p.split("/")[0]; return DOM.indexOf(t) >= 0 ? t : null; }
@@ -522,11 +542,70 @@ function reveal(p) {
   }
 }
 
+/* ---------- lazy directories ----------
+ * An ignored directory arrives as one node marked lazy: the server never
+ * entered it. Opening one asks /api/ls for that level and grafts the entries
+ * onto N, where the rest of the page treats them like any other node; a
+ * subdirectory arrives lazy itself, so depth is paid for only when walked.
+ * A rebuild of N drops the grafts, and whatever is still open is fetched
+ * again on the next draw. */
+var LZ = {};   /* path -> true (loaded) | array of callbacks (loading) */
+
+function loadLazy(x, then) {
+  var st = LZ[x.path];
+  if (!x.lazy || st === true) { if (then) then(); return; }
+  if (st) { if (then) st.push(then); return; }
+  LZ[x.path] = then ? [then] : [];
+  fetch("/api/ls?path=" + encodeURIComponent(x.path))
+    .then(checkLive)
+    .then(function (r) { return r.ok ? r.json() : {entries: []}; })
+    .then(function (d) {
+      d.entries.forEach(function (e) {
+        var p = x.path + "/" + e.name;
+        if (idx(p) >= 0) return;
+        N.push({i: N.length, path: p, name: e.name, type: e.type,
+                lazy: e.type === "dir", size: e.size, mtime: e.mtime,
+                outs: [], ins: []});
+      });
+      var cbs = LZ[x.path];
+      LZ[x.path] = true;
+      cbs.forEach(function (f) { f(); });
+    })
+    .catch(function (e) {
+      var cbs = LZ[x.path];
+      delete LZ[x.path];
+      if (cbs && cbs.length) cbs.forEach(function (f) { f(); });
+      if (isTransport(e)) offline(e);
+    });
+}
+
+/* A path with no index entry may live under a lazy directory: load the chain
+ * of directories above it, then answer with whatever idx() says. Each round
+ * loads one level deeper, so the tries bound both the work and any retry of
+ * a level that failed. */
+function ensurePath(p, then, tries) {
+  if (tries === undefined) tries = p.split("/").length;
+  if (idx(p) >= 0 || tries <= 0) return then();
+  var parts = p.split("/"), acc = "", best = null, k, j;
+  for (k = 0; k < parts.length - 1; k++) {
+    acc = acc ? acc + "/" + parts[k] : parts[k];
+    if ((j = idx(acc)) >= 0) best = N[j];
+  }
+  if (!best || !best.lazy || LZ[best.path] === true) return then();
+  loadLazy(best, function () { ensurePath(p, then, tries - 1); });
+}
+function withPath(p, cb) {
+  var j = idx(p);
+  if (j >= 0 || !p) return cb(j);
+  ensurePath(p, function () { cb(idx(p)); });
+}
+
 /* ---------- model ---------- */
 function build() {
+  LZ = {};
   N = G.nodes.map(function (n, i) {
     return {i: i, path: n.path, name: n.name || "/", type: n.type,
-            size: n.size, mtime: n.mtime, outs: [], ins: []};
+            lazy: !!n.lazy, size: n.size, mtime: n.mtime, outs: [], ins: []};
   });
   G.edges.forEach(function (e) {
     N[e.s].outs.push(e);
@@ -566,8 +645,13 @@ function navTree() {
           (d ? " style='--c:var(--d-" + d + ")'" : "") +
           "><span class='tw' style='margin-left:" + pad + "px'>" + (isOpen ? "▾" : "▸") +
           "</span><span class='nm'>" + esc(x.name) + "</span><span class='ct'>" +
-          countIn(x.path) + "</span></div>";
-        if (isOpen) walk(x.path, depth + 1);
+          (x.lazy ? "…" : countIn(x.path)) + "</span></div>";
+        if (isOpen) {
+          /* an open lazy branch whose level is not in yet: fetch it and
+           * draw again when it lands */
+          if (x.lazy && LZ[x.path] === undefined) loadLazy(x, navTree);
+          walk(x.path, depth + 1);
+        }
       } else {
         h += "<div class='row" + (cur === x.i ? " on" : "") + "' data-i='" + x.i +
           "'><span class='tw' style='margin-left:" + pad + "px'></span><span class='nm'>" +
@@ -625,7 +709,8 @@ function fileHead(x) {
   var bits = [], act = "";
 
   bits.push("<span class='kind'>" + kindOf(x) + "</span>");
-  if (x.type === "dir") bits.push("<b>" + countIn(x.path) + "</b> files");
+  if (x.type === "dir") bits.push(x.lazy ? "<b>not indexed</b>" :
+                                  "<b>" + countIn(x.path) + "</b> files");
   else bits.push("<b>" + fmtSize(x.size) + "</b>");
   if (x.mtime) bits.push(fmtDate(x.mtime));
   bits.push("<b>" + x.ins.length + "</b> referring");
@@ -634,7 +719,7 @@ function fileHead(x) {
    * spreadsheet gets a spreadsheet and the page stays where it is */
   if (x.type === "note")
     act = "<span class='btn' id='goedit'>edit</span>";
-  else if (x.type === "file")
+  else if (x.type === "file" && openable(x))
     act = "<span class='btn' id='goopen'>open</span>";
   return "<div class='filehead'><span class='meta'>" +
     bits.join("<i>·</i>") + "</span>" + act + "</div>";
@@ -676,6 +761,15 @@ function show(i, fromTree) {
 }
 
 function folder(x) {
+  /* a lazy folder is listed on demand: fetch the level, then render it like
+   * any other, provided the reader has not moved on meanwhile */
+  if (x.lazy && LZ[x.path] !== true) {
+    $("#pane").innerHTML = "<div class='prose'><p><em>reading…</em></p></div>";
+    loadLazy(x, function () {
+      if (cur === x.i) { folder(x); navTree(); }
+    });
+    return;
+  }
   var kids = children(x.path), h = "";
   var rd = kids.filter(function (k) { return /^README\.md$/i.test(k.name); })[0];
   if (rd) h += "<div class='readme'><div class='prose' id='rdbody'></div></div>";
@@ -687,7 +781,8 @@ function folder(x) {
       (k.type === "dir" ? "▸" : "·") + "</span>" +
       (k.type === "dir" ? esc(k.name) : fname(k.name)) + "</td>" +
       "<td class='n " + (k.ins.length ? "dim" : "zero") + "'>" + (k.ins.length || "·") + "</td>" +
-      "<td class='n dim'>" + (k.type === "dir" ? countIn(k.path) + " files" : fmtSize(k.size)) + "</td>" +
+      "<td class='n dim'>" + (k.type === "dir" ?
+        (k.lazy ? "…" : countIn(k.path) + " files") : fmtSize(k.size)) + "</td>" +
       "<td class='n dim'>" + fmtDate(k.mtime) + "</td></tr>";
   });
   h += "</tbody></table>";
@@ -1114,10 +1209,35 @@ function md(src) {
       if (/^[a-z][a-z0-9+.-]*:/i.test(href)) return _;
       return "<span class='wl' data-p='" + href + "'>" + txt + "</span>";
     });
+    /* Inline HTML, the closed set README badges actually use: a, img, br and
+     * centering wrappers, rebuilt from their attributes under the same scheme
+     * rules as the markdown forms — never passed through, so nothing a tag
+     * carried besides src, href, alt and width survives. Everything else
+     * stays what it was: escaped text. */
+    s = s.replace(/&lt;a\b([\s\S]*?)&gt;([\s\S]*?)&lt;\/a&gt;/gi, function (_, at, body) {
+      var href = attrOf(unesc(at), "href");
+      if (!safeHref(href)) return body;
+      return "<a class='" + (/^\s*&lt;img/i.test(body) ? "html-a" : "ext") +
+        "' href='" + esc(href) + "' target='_blank' rel='noreferrer noopener'>" +
+        body + "</a>";
+    });
+    s = s.replace(/&lt;img\b([\s\S]*?)\/?&gt;/gi, function (_, at) {
+      var a = unesc(at), src = attrOf(a, "src"), w = attrOf(a, "width"), url;
+      if (/^https?:/i.test(src)) url = src;
+      else if (!src || /^[a-z][a-z0-9+.-]*:/i.test(src)) return "";
+      else url = "/api/raw?path=" + encodeURIComponent(src).replace(/'/g, "%27");
+      return "<img class='html-img' src='" + esc(url) + "' alt='" +
+        esc(attrOf(a, "alt")) + "'" +
+        (/^\d+$/.test(w) ? " width='" + w + "'" : "") + ">";
+    });
+    s = s.replace(/&lt;br\s*\/?&gt;/gi, "<br>");
+    s = s.replace(/&lt;(?:p|div)\b[\s\S]*?align\s*=\s*(?:&#34;|&#39;)?\s*center[\s\S]*?&gt;|&lt;center\s*&gt;/gi,
+      "<span style='display:block;text-align:center'>");
+    s = s.replace(/&lt;\/(?:p|div|center)&gt;/gi, "</span>");
+    s = s.replace(/&lt;\/?(?:p|div)\b[\s\S]*?&gt;/gi, "");
     s = s.replace(/~~([^~]+)~~/g, "<del>$1</del>");
     s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
     s = s.replace(/(^|[^*\w])\*([^*\n]+)\*/g, "$1<em>$2</em>");
-    s = s.replace(/  $/, "<br>");
     return s;
   }
 
@@ -1224,10 +1344,26 @@ function md(src) {
       continue;
     }
 
+    /* indented code, the four-space form: tree diagrams and pasted output
+     * keep their shape without fences. After the list rule, so an indented
+     * bullet stays a nested list. */
+    if (/^(    |\t)/.test(ln) && ln.trim()) {
+      var cb = [];
+      while (i < lines.length &&
+             (!lines[i].trim() || /^(    |\t)/.test(lines[i])))
+        cb.push(lines[i++].replace(/^(    |\t)/, ""));
+      while (cb.length && !cb[cb.length - 1].trim()) cb.pop();
+      emit("<div class='codeblock'><pre><code>" + esc(cb.join("\n")) +
+        "</code></pre></div>", L0);
+      continue;
+    }
+
     if (!ln.trim()) { i++; continue; }
 
-    /* paragraph: consecutive non-blank lines are one block, so prose wrapped
-     * in the source reads as a paragraph rather than as several */
+    /* Paragraph: consecutive non-blank lines are one block, so prose wrapped
+     * in the source reads as a paragraph rather than as several. A line ended
+     * with two spaces is the author asking for a break, and is the one
+     * newline that stays visible — on any line, not only the last. */
     var para = [];
     while (i < lines.length && lines[i].trim() &&
            !/^\s*```/.test(lines[i]) && !/^(#{1,6})\s/.test(lines[i]) &&
@@ -1235,7 +1371,9 @@ function md(src) {
            !/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(lines[i]) &&
            !(lines[i].indexOf("|") >= 0 && i + 1 < lines.length && isTableSep(lines[i + 1])))
       para.push(lines[i++]);
-    if (para.length) emit("<p>" + inline(para.join("\n")).replace(/\n/g, " ") + "</p>", L0);
+    if (para.length)
+      emit("<p>" + inline(para.join("\n")).replace(/ {2,}(\n|$)/g, "<br>")
+        .replace(/\n/g, " ") + "</p>", L0);
   }
   return out.join("");
 }
@@ -1264,7 +1402,7 @@ function hints() {
     var x = cur >= 0 ? N[cur] : null;
     list = [["k/j", "down/up"], ["h/l", "fold"], ["\u23ce", "open"]];
     if (x && x.type === "note") list.push(["e", "edit"]);
-    if (x) list.push(["o", "open"]);
+    if (openable(x)) list.push(["o", "open"]);
     list.push(["/", "search"], [":!", "shell"], ["gg/G", "ends"]);
   }
   var el = $("#st-hints");
@@ -1437,6 +1575,7 @@ function browseKey(ev) {
  * window and from a browser. */
 function openWith(x) {
   if (!x || x.type === "missing") return flash("nothing to open", 1);
+  if (!openable(x)) return flash("will not open this file type", 1);
   api("POST", "/api/open?path=" + encodeURIComponent(x.path)).then(function (r) {
     if (r.ok) flash("opened " + (x.name || "/"));
     else flash(r.body || "cannot open", 1);
@@ -1962,9 +2101,10 @@ function reload(keepPath) {
   fetch("/api/graph").then(checkLive).then(function (r) { return r.json(); }).then(function (d) {
     G = d;
     build();
-    var j = idx(keepPath);
-    if (ED.on) { navTree(); if (j >= 0) ED.node = j; }
-    else show(j >= 0 ? j : 0);
+    withPath(keepPath, function (j) {
+      if (ED.on) { navTree(); if (j >= 0) ED.node = j; }
+      else show(j >= 0 ? j : 0);
+    });
   }).catch(offline);
 }
 
@@ -1985,11 +2125,13 @@ function refresh() {
     G = d;
     build();
     navTree();
-    var j = keep === null ? -1 : idx(keep);
-    if (j < 0) return show(0);
-    cur = j;
-    if (N[j].mtime + ":" + N[j].size !== was || N[j].type === "dir") show(j, true);
-    else reveal(N[j].path);
+    if (keep === null) return show(0);
+    withPath(keep, function (j) {
+      if (j < 0) return show(0);
+      cur = j;
+      if (N[j].mtime + ":" + N[j].size !== was || N[j].type === "dir") show(j, true);
+      else reveal(N[j].path);
+    });
   }).catch(offline);
 }
 /* Mid-edit the buffer is sacred, but the tree can still follow the disk,
@@ -2003,13 +2145,15 @@ function refreshEditing() {
     G = d;
     build();
     navTree();
-    var j = idx(path);
-    if (j < 0) { setState("removed on disk — :w! to write it back", "err"); return; }
-    ED.node = j;
-    if (N[j].mtime !== ED.mtime && !ED.stale) {
-      ED.stale = true;
-      setState("changed on disk — :w! to overwrite, :q! to discard", "err");
-    }
+    withPath(path, function (j) {
+      if (!ED.on) return;
+      if (j < 0) { setState("removed on disk — :w! to write it back", "err"); return; }
+      ED.node = j;
+      if (N[j].mtime !== ED.mtime && !ED.stale) {
+        ED.stale = true;
+        setState("changed on disk — :w! to overwrite, :q! to discard", "err");
+      }
+    });
   }).catch(offline);
 }
 function refreshSoon() {

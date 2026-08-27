@@ -67,6 +67,13 @@ check "writes AGENTS.md and a README in each directory" "$missing" ""
 check_contains "AGENTS.md describes the link convention" \
 	"$(cat "$WORK/new/AGENTS.md")" "[[people/"
 
+# The starting .graphignore: display keeps ignored directories visible but
+# unread, and init is what plants the file.
+check_contains "writes a starting .graphignore" \
+	"$(cat "$WORK/new/.graphignore" 2>/dev/null)" "node_modules"
+check_contains "the starter documents are ignored" \
+	"$(cat "$WORK/new/.graphignore" 2>/dev/null)" "/AGENTS.md"
+
 mkdir -p "$WORK/empty"
 check_status "accepts an existing empty directory" 0 "$GRAPH" init "$WORK/empty"
 
