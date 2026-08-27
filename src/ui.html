@@ -252,8 +252,14 @@ table.ls td.nm .fx { color: var(--ghost); }
 .wl:hover { border-bottom-color: var(--accent); }
 .wl.broken { color: var(--alert); border-bottom: 1px dashed rgba(227,87,79,.4); cursor: help; }
 
-/* folder listing */
-table.ls { width: 100%; border-collapse: collapse; margin-top: 6px; }
+/* folder listing. Fixed layout, or a long name decides the table's width
+ * for everyone and the pane grows a horizontal scrollbar: the name column
+ * takes what the numeric columns leave and ellipsizes past that, with the
+ * full name in the row's title. */
+table.ls { width: 100%; border-collapse: collapse; margin-top: 6px; table-layout: fixed; }
+table.ls th:nth-child(2) { width: 58px; }
+table.ls th:nth-child(3) { width: 92px; }
+table.ls th:nth-child(4) { width: 112px; }
 table.ls th {
   text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--line);
   font-size: 9px; letter-spacing: 1.1px; text-transform: uppercase; color: var(--faint); font-weight: 600;
@@ -262,7 +268,7 @@ table.ls th.n, table.ls td.n { text-align: right; }
 table.ls td { padding: 5px 10px; border-bottom: 1px solid var(--line-2); white-space: nowrap; }
 table.ls tr { cursor: pointer; }
 table.ls tbody tr:hover { background: var(--raised); }
-table.ls td.nm { width: 55%; overflow: hidden; text-overflow: ellipsis; }
+table.ls td.nm { overflow: hidden; text-overflow: ellipsis; }
 table.ls td.nm .k { color: var(--faint); padding-right: 8px; }
 table.ls td.dim { color: var(--faint); }
 table.ls td.zero { color: var(--ghost); }
@@ -777,7 +783,8 @@ function folder(x) {
        "<th class='n'>Size</th><th class='n'>Modified</th></tr></thead><tbody>";
   kids.forEach(function (k) {
     if (rd && k.i === rd.i) return;
-    h += "<tr data-i='" + k.i + "'><td class='nm'><span class='k'>" +
+    h += "<tr data-i='" + k.i + "'><td class='nm' title='" + esc(k.name) +
+      "'><span class='k'>" +
       (k.type === "dir" ? "▸" : "·") + "</span>" +
       (k.type === "dir" ? esc(k.name) : fname(k.name)) + "</td>" +
       "<td class='n " + (k.ins.length ? "dim" : "zero") + "'>" + (k.ins.length || "·") + "</td>" +
@@ -802,16 +809,32 @@ function folder(x) {
       .catch(onFail());
 }
 
+/* The server names its refusals (too large, cannot read, not found), so a
+ * failed read shows those words rather than a blanket "unreadable". */
+function readText(r) {
+  return r.text().then(function (t) {
+    if (!r.ok) return Promise.reject({app: t || "unreadable"});
+    return t;
+  });
+}
+function saidWhy(el, fallback) {
+  return function (e) {
+    var b = $(el);
+    if (b) b.innerHTML = "<div class='prose'><p><em>" +
+      esc(e && e.app ? e.app : fallback) + "</em></p></div>";
+  };
+}
+
 function note(x) {
   $("#pane").innerHTML = "<div class='prose' id='body'><p><em>reading…</em></p></div>";
   fetch("/api/file?path=" + encodeURIComponent(x.path))
     .then(checkLive)
-    .then(function (r) { return r.ok ? r.text() : Promise.reject(); })
+    .then(readText)
     .then(function (t) {
       var b = $("#body");
       if (b) { mdBase = parentOf(x.path); b.innerHTML = md(t); wire(b); }
     })
-    .catch(onFail(function () { $("#body").innerHTML = "<p><em>unreadable</em></p>"; }));
+    .catch(onFail(saidWhy("#body", "unreadable")));
 }
 
 function extOf(p) {
@@ -838,21 +861,21 @@ function other(x) {
   if (e === "csv" || e === "tsv") {
     fetch("/api/file?path=" + encodeURIComponent(x.path))
       .then(checkLive)
-      .then(function (r) { return r.text(); })
+      .then(readText)
       .then(function (t) { pane.innerHTML = csvTable(t, e === "tsv" ? "\t" : ","); })
-      .catch(onFail(function () { pane.innerHTML = "<div class='prose'><p><em>unreadable</em></p></div>"; }));
+      .catch(onFail(saidWhy("#pane", "unreadable")));
     return;
   }
   if (["txt", "log", "conf", "ini", "json", "yaml", "yml", "sh", "c", "h", "py", "js"].indexOf(e) >= 0) {
     fetch("/api/file?path=" + encodeURIComponent(x.path))
       .then(checkLive)
-      .then(function (r) { return r.text(); })
+      .then(readText)
       .then(function (t) {
         pane.innerHTML = "<div class='prose'><div class='codeblock'>" +
           (e ? "<span class='lang'>" + esc(e) + "</span>" : "") +
           "<pre><code>" + highlight(t, e) + "</code></pre></div></div>";
       })
-      .catch(onFail(function () { pane.innerHTML = "<div class='prose'><p><em>unreadable</em></p></div>"; }));
+      .catch(onFail(saidWhy("#pane", "unreadable")));
     return;
   }
   pane.innerHTML = "<div class='prose'><p><em>" + esc(x.name) +

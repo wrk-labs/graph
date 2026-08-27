@@ -730,16 +730,31 @@ readable_abs(const char *rel, char *abs, size_t n)
 	return 0;
 }
 
+/* Failures are named for what they are: a path the scan does not know is
+ * not found, a file past the text cap is too large, and one that cannot be
+ * read says so — "not found" for a file whose size the page just printed
+ * would be a lie. */
 static void
 send_file(FILE *f, const char *rel)
 {
 	char abs[PATH_MAX];
+	struct stat st;
 	char *body;
 	size_t len;
+	const char *msg;
 
-	if (readable_abs(rel, abs, sizeof(abs)) < 0 ||
-	    !(body = slurp(abs, &len))) {
+	if (readable_abs(rel, abs, sizeof(abs)) < 0) {
 		send_text(f, "404 Not Found", "text/plain", "not found", 9);
+		return;
+	}
+	if (stat(abs, &st) == 0 && st.st_size > MAX_BODY) {
+		msg = "too large to show as text; open it instead";
+		send_text(f, "413 Payload Too Large", "text/plain", msg, strlen(msg));
+		return;
+	}
+	if (!(body = slurp(abs, &len))) {
+		msg = "cannot read this file";
+		send_text(f, "500 Internal Server Error", "text/plain", msg, strlen(msg));
 		return;
 	}
 	send_text(f, "200 OK", "text/plain; charset=utf-8", body, len);
@@ -894,27 +909,39 @@ mime_of(const char *path)
 }
 
 /* Serve a file with its real content type so the browser can display it in
- * place. Same guard as every other read: only paths the scan already found. */
+ * place. Same guard as every other read: only paths the scan already found.
+ * Streamed rather than slurped: MAX_BODY sizes what a note edit may carry,
+ * not what a PDF or a video may weigh, and a 6 MB book must not answer
+ * "not found" for being a book. */
 static void
 send_raw(FILE *f, const char *rel)
 {
-	char abs[PATH_MAX];
-	char *body;
-	size_t len;
+	char abs[PATH_MAX], buf[8192];
+	struct stat st;
+	FILE *in;
+	size_t n;
 
-	if (readable_abs(rel, abs, sizeof(abs)) < 0 ||
-	    !(body = slurp(abs, &len))) {
+	if (readable_abs(rel, abs, sizeof(abs)) < 0) {
 		send_text(f, "404 Not Found", "text/plain", "not found", 9);
+		return;
+	}
+	if (stat(abs, &st) < 0 || !S_ISREG(st.st_mode) ||
+	    !(in = fopen(abs, "rb"))) {
+		const char *msg = "cannot read this file";
+
+		send_text(f, "500 Internal Server Error", "text/plain", msg, strlen(msg));
 		return;
 	}
 	/* An SVG opened by itself is a document that may run script; the
 	 * sandbox drops it into an opaque origin, where it can see nothing
 	 * of this one. As an <img> it never ran script anyway. */
-	send_head_x(f, "200 OK", mime_of(rel), len,
+	send_head_x(f, "200 OK", mime_of(rel), (size_t)st.st_size,
 	    strstr(mime_of(rel), "svg") ?
 	    "Content-Security-Policy: sandbox\r\n" : "");
-	fwrite(body, 1, len, f);
-	free(body);
+	while ((n = fread(buf, 1, sizeof(buf), in)) > 0)
+		if (fwrite(buf, 1, n, f) != n)
+			break;
+	fclose(in);
 }
 
 /* Hand a file to whatever the desktop opens it with, or a directory to the
