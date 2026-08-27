@@ -636,25 +636,41 @@ send_raw(FILE *f, const char *rel)
 
 /* Hand a file to whatever the desktop opens it with, or a directory to the
  * file manager. Same rules as a write: only a path the scan knows, and
- * never something the opener would run rather than show — an executable
- * bit or a launcher extension is an answer of no. The opener runs
- * detached with its output discarded, so it can neither block nor talk
- * back into this connection. */
+ * never something the opener would run rather than show. Safety is an
+ * allow-list — a file opens only when its extension is a known viewer
+ * type, so a file whose type we don't recognise (or that carries no
+ * extension) is an answer of no, not a guess. The opener runs detached
+ * with its output discarded, so it can neither block nor talk back into
+ * this connection. */
 static int
-launcher_ext(const char *name)
+viewer_ext(const char *name)
 {
-	static const char *const bad[] = {
-		".command", ".sh", ".bash", ".zsh", ".app", ".jar", ".desktop",
-		".exe", ".bat", ".cmd", ".com", ".scpt", ".workflow", ".pkg",
-		".dmg", ".msi", ".ps1", ".vbs", ".py", ".rb", ".pl", NULL
+	static const char *const ok[] = {
+		/* images */
+		".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif",
+		".tiff", ".heic", ".heif", ".avif", ".ico",
+		/* documents */
+		".pdf", ".txt", ".text", ".md", ".markdown", ".rtf", ".csv",
+		".tsv", ".log", ".json", ".xml", ".yaml", ".yml",
+		/* office / iWork */
+		".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".odt",
+		".ods", ".odp", ".pages", ".numbers", ".key",
+		/* audio */
+		".mp3", ".wav", ".flac", ".aac", ".m4a", ".ogg", ".oga",
+		".opus", ".aiff",
+		/* video */
+		".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi", ".mpg",
+		".mpeg",
+		/* ebook */
+		".epub", NULL
 	};
 	const char *d = strrchr(name, '.');
 	int i;
 
 	if (!d)
 		return 0;
-	for (i = 0; bad[i]; i++)
-		if (!strcasecmp(d, bad[i]))
+	for (i = 0; ok[i]; i++)
+		if (!strcasecmp(d, ok[i]))
 			return 1;
 	return 0;
 }
@@ -677,9 +693,9 @@ open_path(FILE *f, const char *rel)
 		return;
 	}
 	if (nodes[i].type != T_DIR &&
-	    ((st.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) || launcher_ext(rel))) {
+	    ((st.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) || !viewer_ext(rel))) {
 		send_text(f, "403 Forbidden", "text/plain",
-		    "will not open an executable", 27);
+		    "will not open this file type", 28);
 		return;
 	}
 	if (!have_display()) {

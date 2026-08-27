@@ -10,9 +10,20 @@ PREFIX = /usr/local
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Darwin)
 CFLAGS += -D_DARWIN_C_SOURCE
+else
+# Linux: build a position-independent executable and lock down the GOT so a
+# memory-corruption bug is harder to turn into code execution. macOS builds
+# PIE by default and Apple's linker rejects these GNU-ld options, so they are
+# Linux-only.
+CFLAGS  += -fPIE
+LDFLAGS += -pie -Wl,-z,relro,-z,now
 endif
 
+# Hardening, every platform: stack canaries catch overflows of on-stack
+# buffers, and _FORTIFY_SOURCE swaps in bounds-checked libc calls (needs an
+# optimisation level, which -Os provides).
 CFLAGS  += -std=c99 -pedantic -Wall -Wextra -Os \
+           -fstack-protector-strong -D_FORTIFY_SOURCE=2 \
            -D_XOPEN_SOURCE=700 -DVERSION=\"$(VERSION)\"
 
 SRC = src/graph.c src/init.c src/display.c src/config.c src/serve.c src/connect.c src/status.c src/smb.c src/util.c
