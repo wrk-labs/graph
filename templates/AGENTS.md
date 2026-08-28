@@ -16,7 +16,7 @@ before adding, changing or moving anything.
     archive/          inactive material that is retained
     journal/          the owner's record, by time
     journal/agents/   your record: what each agent did, one file per day
-    .graph/           Graph's own view of the repository: its marker and structure
+    .graph/           Graph's own: its marker, and the memory if enabled
 
 Each directory has a `README.md` explaining what belongs in it and how entries
 are shaped. Read the README of a directory before adding to it. The owner may
@@ -88,6 +88,41 @@ journal is current while you are working and complete if you stop early.
 Append to the day's file; earlier entries stay as they were. The journal is
 how any change in the repository is traced back to the session that made it.
 `journal/` itself is the owner's; write there only when asked.
+
+## Memory
+
+This repository may carry a memory of its owner: how they decide, rather than
+what the files hold. It is served by an MCP server called `self`, and whether
+it is switched on is the owner's choice — they turn it on with `graph enable
+mcp` and off with `graph disable mcp`. If you have `self` tools, it is there;
+if you do not, it is not, and nothing in this repository depends on it.
+
+Where it is there, query it before advising, filing, or making a judgment call
+on the owner's behalf: `search_nodes` with the domain you are about to act in,
+`open_nodes` for an exact name, `read_graph` when you need the whole picture —
+it is small enough to read.
+
+Entities are domains of judgment rather than facts — `Filing`, `Privacy`,
+`Money`, `Communication` — and each observation is one policy, written as
+when, then and why:
+
+    2026-08-12 (stated): a contract goes under the organization it was
+    signed with, never under the signatory — the contract outlives the
+    contact.
+
+Two conventions carry the weight. Date every observation: it is how the owner
+reads their own drift later, and how you tell a rule that still holds from one
+they have outgrown. And mark `(stated)` or `(inferred)` — something they told
+you is not something you concluded about them. Write an inference as the
+observation that prompted it, never as a trait, and expect to be wrong.
+
+Keep it small. When something new contradicts what is recorded, that is the
+most useful moment there is: say so, and revise the observation rather than
+adding a second one beside it. A memory that only ever grows stops being
+judgment and becomes a pile.
+
+Never copy it out of the repository. It generalizes about a person, which
+makes it more revealing than the documents it describes.
 
 ## Finding things
 

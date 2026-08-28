@@ -26,7 +26,7 @@ CFLAGS  += -std=c99 -pedantic -Wall -Wextra -Os \
            -fstack-protector-strong -D_FORTIFY_SOURCE=2 \
            -D_XOPEN_SOURCE=700 -DVERSION=\"$(VERSION)\"
 
-SRC = src/graph.c src/init.c src/display.c src/config.c src/serve.c src/connect.c src/status.c src/smb.c src/util.c
+SRC = src/graph.c src/init.c src/display.c src/config.c src/serve.c src/connect.c src/status.c src/mcp.c src/smb.c src/util.c
 OBJ = $(SRC:.c=.o)
 BIN = graph
 

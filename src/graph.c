@@ -24,6 +24,8 @@ usage(FILE *out)
 	    "                           mount a remote repository\n"
 	    "  disconnect <destination> release a connected repository\n"
 	    "  status                   what is served and what is connected\n"
+	    "  enable mcp [path]        give agents a memory of the repository\n"
+	    "  disable mcp [path]       remove it, keeping what it remembered\n"
 	    "\n"
 	    "  -v, --version  print version\n"
 	    "  -h, --help     print this message\n",
@@ -72,6 +74,10 @@ main(int argc, char *argv[])
 		return cmd_disconnect(argc - 2, argv + 2);
 	if (!strcmp(cmd, "status"))
 		return cmd_status(argc - 2, argv + 2);
+	if (!strcmp(cmd, "enable"))
+		return cmd_enable(argc - 2, argv + 2);
+	if (!strcmp(cmd, "disable"))
+		return cmd_disable(argc - 2, argv + 2);
 
 	warn("unknown command: %s", cmd);
 	usage(stderr);

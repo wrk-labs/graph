@@ -26,6 +26,8 @@ int cmd_unserve(int argc, char *argv[]);
 int cmd_connect(int argc, char *argv[]);
 int cmd_disconnect(int argc, char *argv[]);
 int cmd_status(int argc, char *argv[]);
+int cmd_enable(int argc, char *argv[]);
+int cmd_disable(int argc, char *argv[]);
 
 /* True when there is a desktop to open a window on. */
 int have_display(void);

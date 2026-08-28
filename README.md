@@ -49,6 +49,10 @@ See what is served and what is connected:
 
     graph status
 
+Give an agent a memory of the repository:
+
+    graph enable mcp /srv/graph
+
 Look at it:
 
     graph display /srv/graph
@@ -111,6 +115,46 @@ Markdown files can point at each other by path:
 Paths start at the repository root. `graph display` follows these links and
 draws them; in the files themselves they are ordinary text.
 
+## Memory
+
+`graph enable mcp` wires a memory server into a repository, so that whatever
+you work with — Claude, or anything else that speaks MCP — keeps an account of
+you across sessions and machines instead of starting cold each time.
+
+What it holds is not what the files contain, which an agent can read for
+itself, but how you decide: that a contract belongs with the organization
+rather than the person who signed it, that a phone number is redacted before
+it leaves the tree, that you would rather be asked than have something filed
+for you. An agent queries it before advising and adds to it as you work.
+
+Everything lives in the repository:
+
+    .graph/mcp/self.jsonl    what it remembers
+    .graph/mcp/serve.sh      the launcher
+    .mcp.json                the pointer agents look for at the root
+
+so the memory travels with the tree. Mounted over SMB, copied to another
+machine or restored from a backup, the repository carries both what it knows
+and the wiring to serve it. The conventions are set out in the `AGENTS.md`
+that `init` writes — every observation dated, and marked for whether you said
+it or an agent inferred it — because an undated pile of assertions about
+someone is worse than no account at all. That guidance is there whether or not
+the server is switched on, and says so; `enable` and `disable` change only the
+wiring.
+
+Turn it off with:
+
+    graph disable mcp /srv/graph
+
+which takes out the wiring and keeps what was remembered: nothing else in the
+repository can reconstruct it. A `.mcp.json` you have since added other servers
+to is left alone. Note that once a memory exists, `.graph/` holds something
+that cannot be rebuilt from the files — deleting the directory loses it.
+
+Of everything in a repository this is the most revealing, because it
+generalizes about a person where the files only record. It stays in the tree,
+and `AGENTS.md` tells agents not to copy it out.
+
 ## Requirements
 
 Serving needs Samba, along with its VFS modules (`samba-vfs-modules` on Debian
@@ -122,6 +166,11 @@ browser where that is not available.
 Graph generates the whole Samba configuration and assumes the machine is not
 already serving SMB for something else. The configuration in place before Graph
 first ran is kept at `/etc/samba/smb.conf.pre-graph`.
+
+Memory needs Node. `graph enable mcp` writes a launcher that runs the server
+through `npx`, which fetches it on first use and caches it outside the
+repository — nothing is installed into the tree, and there is nothing to
+commit or back up beyond the files themselves.
 
 Whether the SMB service starts at boot is left to the init system. Disable it
 (`systemctl disable smbd`) and `graph serve` will start it when you ask for a

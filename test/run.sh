@@ -54,6 +54,12 @@ for d in inbox people organizations finance research knowledge archive \
 done
 check "creates the default layout" "$missing" ""
 
+# The memory guidance ships with every repository and describes the server as
+# something that may or may not be switched on, so enable and disable never
+# have to edit prose the user owns.
+check_contains "AGENTS.md documents the memory" \
+	"$(cat "$WORK/new/AGENTS.md")" "## Memory"
+
 # Every default directory explains itself, and AGENTS.md explains the whole:
 # the guidance is part of the repository, not of the tool.
 missing=
@@ -93,6 +99,70 @@ check_status "refuses a path that is not a directory" 1 "$GRAPH" init "$WORK/afi
 
 check_status "refuses without a path" 1 "$GRAPH" init
 check_status "refuses more than one path" 1 "$GRAPH" init "$WORK/a" "$WORK/b"
+
+# --- graph enable mcp -----------------------------------------------------
+
+group "graph enable mcp"
+
+check_status "refuses a directory that is not a repository" 1 \
+	"$GRAPH" enable mcp "$WORK"
+check_status "refuses a feature it does not have" 1 \
+	"$GRAPH" enable nonsense "$WORK/new"
+
+check_status "enables on a repository" 0 "$GRAPH" enable mcp "$WORK/new"
+check "writes the launcher" \
+	"$([ -x "$WORK/new/.graph/mcp/serve.sh" ] && echo yes)" "yes"
+check "writes the pointer at the root" \
+	"$([ -f "$WORK/new/.mcp.json" ] && echo yes)" "yes"
+check "creates the store" \
+	"$([ -f "$WORK/new/.graph/mcp/self.jsonl" ] && echo yes)" "yes"
+
+# The launcher must resolve the store against itself: a relative
+# MEMORY_FILE_PATH lands in the npx cache instead of the repository.
+check_contains "the launcher derives an absolute store path" \
+	"$(cat "$WORK/new/.graph/mcp/serve.sh")" 'dir=$(cd "$(dirname "$0")" && pwd)'
+
+# Enabling twice is how a repository picks up a corrected launcher, so it
+# must not empty the store.
+printf '{"type":"entity","name":"Filing","entityType":"domain"}\n' \
+	> "$WORK/new/.graph/mcp/self.jsonl"
+check_status "enables again" 0 "$GRAPH" enable mcp "$WORK/new"
+check "does not empty the store" \
+	"$(grep -c Filing "$WORK/new/.graph/mcp/self.jsonl")" "1"
+
+# A .mcp.json naming other servers cannot be merged without a JSON parser,
+# so enable has to refuse rather than overwrite it.
+printf '{"mcpServers":{"other":{"command":"foo"}}}\n' > "$WORK/new/.mcp.json"
+check_status "refuses a foreign .mcp.json" 1 "$GRAPH" enable mcp "$WORK/new"
+check_contains "leaves the foreign config intact" \
+	"$(cat "$WORK/new/.mcp.json")" '"other"'
+
+group "graph disable mcp"
+
+check_status "disables" 0 "$GRAPH" disable mcp "$WORK/new"
+check "removes the launcher" \
+	"$([ -e "$WORK/new/.graph/mcp/serve.sh" ] || echo gone)" "gone"
+check "leaves a foreign .mcp.json alone" \
+	"$([ -f "$WORK/new/.mcp.json" ] && echo kept)" "kept"
+
+# Disabling the server is not a request to forget, and nothing else in the
+# repository can reconstruct what it held.
+check "keeps the store" \
+	"$(grep -c Filing "$WORK/new/.graph/mcp/self.jsonl")" "1"
+
+# enable and disable move wiring only. AGENTS.md is the user's file: init
+# writes it once, describes the memory as something that may or may not be
+# switched on, and nothing refills or edits it afterwards.
+check "leaves AGENTS.md untouched throughout" \
+	"$(grep -c '^## Memory' "$WORK/new/AGENTS.md")" "1"
+
+rm -f "$WORK/new/.mcp.json"
+"$GRAPH" enable mcp "$WORK/new" >/dev/null 2>&1
+check "removes its own .mcp.json" \
+	"$("$GRAPH" disable mcp "$WORK/new" >/dev/null 2>&1
+	   [ -e "$WORK/new/.mcp.json" ] || echo gone)" "gone"
+
+# --- smb configuration ----------------------------------------------------
 
 # --- smb module -----------------------------------------------------------
 # Rewrites /etc/samba/smb.conf, which is why the suite is container-only.
