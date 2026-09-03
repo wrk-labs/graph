@@ -98,6 +98,7 @@ graphBinary(void)
 @property (strong) NSTask *server;
 @property (strong) NSWindow *window;
 @property (strong) WKWebView *web;
+- (void)shellAtSelection;
 @end
 
 /* ---- a shell tab: a window, a web view running xterm.js, a pty ---- */
@@ -233,6 +234,33 @@ static App *app;
 
 	if ([s hasPrefix:@"sh:"])
 		[app shellFor:self.dir run:[s substringFromIndex:3]];
+}
+
+/* Where the page's selection sits, as a repository-relative folder: a
+ * folder as itself, a note as the folder holding it, "" for the root. */
+static NSString *const SelJS =
+    @"(function(){var x=(typeof cur!=='undefined'&&cur>=0&&N[cur])?N[cur]:null;"
+    @"if(!x)return'';var p=x.path||'';"
+    @"if(x.type!=='dir'){var i=p.lastIndexOf('/');p=i<0?'':p.substring(0,i);}"
+    @"return p;})()";
+
+/* ⌘T. The page owns the selection, so it has to be asked for it. */
+- (void)shellAtSelection
+{
+	NSString *root = self.dir;
+
+	[self.web evaluateJavaScript:SelJS completionHandler:^(id v, NSError *e) {
+		(void)e;
+		NSString *sub = [v isKindOfClass:[NSString class]] ? v : @"";
+		NSString *dir = sub.length ?
+		    [root stringByAppendingPathComponent:sub] : root;
+		BOOL isdir = NO;
+
+		if (![[NSFileManager defaultManager] fileExistsAtPath:dir
+		    isDirectory:&isdir] || !isdir)
+			dir = root;	/* stale or renamed: the root will do */
+		[app shellFor:dir run:nil];
+	}];
 }
 
 - (void)stop
@@ -928,10 +956,28 @@ sandboxProfile(NSString *repo)
 		[self open:dir];
 }
 
-/* The "+" in the tab bar and ⌘T land here. */
+/* The "+" in the tab bar. */
 - (void)newWindowForTab:(id)sender
 {
 	[self pickAndOpen];
+}
+
+/* ⌘T: a shell where you already are — the selected folder of a display
+ * tab, the same folder again for a shell tab, as Terminal does. */
+- (void)newShellTab:(id)sender
+{
+	NSWindow *key = [NSApp keyWindow];
+
+	for (Term *t in self.terms)
+		if (t.window == key) {
+			[self shellFor:t.dir run:nil];
+			return;
+		}
+	for (Tab *t in self.tabs)
+		if (t.window == key) {
+			[t shellAtSelection];
+			return;
+		}
 }
 
 /* ⌘O */
@@ -1050,7 +1096,7 @@ menus(void)
 	[bar addItem:item];
 
 	m = [[NSMenu alloc] initWithTitle:@"File"];
-	[m addItemWithTitle:@"New Tab" action:@selector(newWindowForTab:) keyEquivalent:@"t"];
+	[m addItemWithTitle:@"New Shell Tab" action:@selector(newShellTab:) keyEquivalent:@"t"];
 	[m addItemWithTitle:@"Open…" action:@selector(openDocument:) keyEquivalent:@"o"];
 	recent = [[NSMenuItem alloc] initWithTitle:@"Open Recent" action:NULL keyEquivalent:@""];
 	recent.submenu = [[NSMenu alloc] initWithTitle:@"Open Recent"];

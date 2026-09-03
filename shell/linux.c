@@ -415,6 +415,45 @@ run_js(GtkWidget *view, const char *js)
 #endif
 }
 
+/* Same, but for a script whose value we want back. */
+static void
+ask_js(GtkWidget *view, const char *js, GAsyncReadyCallback cb, gpointer data)
+{
+#if WEBKIT_CHECK_VERSION(2, 40, 0)
+	webkit_web_view_evaluate_javascript(WEBKIT_WEB_VIEW(view), js, -1,
+	    NULL, NULL, NULL, cb, data);
+#else
+	webkit_web_view_run_javascript(WEBKIT_WEB_VIEW(view), js, NULL, cb, data);
+#endif
+}
+
+/* The string ask_js asked for, or NULL if the script failed. */
+static char *
+ask_js_finish(GObject *view, GAsyncResult *res)
+{
+#if WEBKIT_CHECK_VERSION(2, 40, 0)
+	JSCValue *v = webkit_web_view_evaluate_javascript_finish(
+	    WEBKIT_WEB_VIEW(view), res, NULL);
+	char *s;
+
+	if (!v)
+		return NULL;
+	s = jsc_value_to_string(v);
+	g_object_unref(v);
+	return s;
+#else
+	WebKitJavascriptResult *r = webkit_web_view_run_javascript_finish(
+	    WEBKIT_WEB_VIEW(view), res, NULL);
+	char *s;
+
+	if (!r)
+		return NULL;
+	s = jsc_value_to_string(webkit_javascript_result_get_js_value(r));
+	webkit_javascript_result_unref(r);
+	return s;
+#endif
+}
+
 /* The repository's branch, for the header. NULL if not a checkout. */
 static char *
 git_branch(const char *dir)
@@ -945,6 +984,56 @@ act_close(GSimpleAction *a, GVariant *v, gpointer data)
 		close_term(s);
 }
 
+/* Where the page's selection sits, as a repository-relative folder: a
+ * folder as itself, a note as the folder holding it, "" for the root. */
+#define SEL_JS \
+	"(function(){var x=(typeof cur!=='undefined'&&cur>=0&&N[cur])?N[cur]:null;" \
+	"if(!x)return'';var p=x.path||'';" \
+	"if(x.type!=='dir'){var i=p.lastIndexOf('/');p=i<0?'':p.substring(0,i);}" \
+	"return p;})()"
+
+/* The selection, come back from the page. The tab may have closed while we
+ * were asking, so it has to be looked for before it is read. */
+static void
+on_sel(GObject *view, GAsyncResult *res, gpointer data)
+{
+	struct tab *t = data;
+	char *sub, *dir = NULL;
+
+	if (!g_list_find(tabs, t))
+		return;
+	if ((sub = ask_js_finish(view, res)) && *sub) {
+		dir = g_build_filename(t->dir, sub, NULL);
+		if (!g_file_test(dir, G_FILE_TEST_IS_DIR)) {
+			g_free(dir);
+			dir = NULL;	/* stale or renamed: the root will do */
+		}
+	}
+	open_shell(dir ? dir : t->dir, NULL);
+	g_free(dir);
+	g_free(sub);
+}
+
+/* A shell where you already are: the selected folder of a display tab, the
+ * same folder again for a shell tab, as a terminal opening a tab does. */
+static void
+act_shell(GSimpleAction *a, GVariant *v, gpointer data)
+{
+	int i = gtk_notebook_get_current_page(GTK_NOTEBOOK(book));
+	GtkWidget *page;
+	struct tab *t;
+	struct term *s;
+
+	(void)a; (void)v; (void)data;
+	if (i < 0)
+		return;
+	page = gtk_notebook_get_nth_page(GTK_NOTEBOOK(book), i);
+	if ((s = g_object_get_data(G_OBJECT(page), "term")))
+		open_shell(s->dir, NULL);
+	else if ((t = g_object_get_data(G_OBJECT(page), "tab")))
+		ask_js(t->page, SEL_JS, on_sel, t);
+}
+
 static void
 act_next(GSimpleAction *a, GVariant *v, gpointer data)
 {
@@ -991,7 +1080,7 @@ ensure_window(void)
 	recent = gtk_button_new_from_icon_name("pan-down-symbolic", GTK_ICON_SIZE_MENU);
 	gtk_button_set_relief(GTK_BUTTON(plus), GTK_RELIEF_NONE);
 	gtk_button_set_relief(GTK_BUTTON(recent), GTK_RELIEF_NONE);
-	gtk_widget_set_tooltip_text(plus, "Open a repository (Ctrl+T)");
+	gtk_widget_set_tooltip_text(plus, "Open a repository (Ctrl+O)");
 	gtk_widget_set_tooltip_text(recent, "Recent");
 	g_signal_connect(plus, "clicked", G_CALLBACK(on_new_clicked), NULL);
 	g_signal_connect(recent, "clicked", G_CALLBACK(on_recent_clicked), NULL);
@@ -1055,8 +1144,11 @@ on_startup(GApplication *a, gpointer data)
 	static const GActionEntry acts[] = {
 		{ "new", act_new, NULL, NULL, NULL, { 0 } },
 		{ "close", act_close, NULL, NULL, NULL, { 0 } },
+		{ "shell", act_shell, NULL, NULL, NULL, { 0 } },
 	};
-	static const char *const k_new[] = { "<Primary>t", NULL };
+	static const char *const k_new[] = { "<Primary>o", NULL };
+	/* Shift, so that the shell keeps Ctrl+T for readline and fzf. */
+	static const char *const k_shell[] = { "<Primary><Shift>t", NULL };
 	static const char *const k_close[] = { "<Primary>w", NULL };
 	static const char *const k_next[] = { "<Primary>Page_Down", NULL };
 	static const char *const k_prev[] = { "<Primary>Page_Up", NULL };
@@ -1077,6 +1169,7 @@ on_startup(GApplication *a, gpointer data)
 	g_action_map_add_action(G_ACTION_MAP(a), G_ACTION(tab));
 	gtk_application_set_accels_for_action(GTK_APPLICATION(a), "app.new", k_new);
 	gtk_application_set_accels_for_action(GTK_APPLICATION(a), "app.close", k_close);
+	gtk_application_set_accels_for_action(GTK_APPLICATION(a), "app.shell", k_shell);
 	gtk_application_set_accels_for_action(GTK_APPLICATION(a), "app.next", k_next);
 	gtk_application_set_accels_for_action(GTK_APPLICATION(a), "app.prev", k_prev);
 	for (i = 1; i <= 9; i++) {
